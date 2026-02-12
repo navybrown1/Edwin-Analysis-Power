@@ -45,39 +45,63 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# Clean, professional UI theme with CSS variables
+# Chrome-inspired modern UI theme
 st.markdown("""
 <style>
-    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+    @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Sora:wght@500;700;800&display=swap');
 
     :root {
-        --primary: #6366f1;
-        --primary-hover: #4f46e5;
-        --secondary: #8b5cf6;
-        --bg: #f8fafc;
-        --card-bg: #ffffff;
-        --text: #1e293b;
-        --text-secondary: #64748b;
-        --border: #e2e8f0;
-        --border-light: #f1f5f9;
-        --sidebar-bg: #0f172a;
-        --sidebar-text: #94a3b8;
-        --sidebar-heading: #f8fafc;
-        --success: #10b981;
-        --warning: #f59e0b;
+        --accent-cyan: #0ea5e9;
+        --accent-blue: #2563eb;
+        --accent-amber: #f59e0b;
+        --chrome-100: #f5f7fa;
+        --chrome-200: #d6dee8;
+        --chrome-400: #98a6b8;
+        --chrome-700: #384354;
+        --chrome-900: #111827;
+        --surface: #fbfcfe;
+        --surface-glass: rgba(255, 255, 255, 0.78);
+        --text-main: #111827;
+        --text-soft: #5b6779;
+        --line: #d9e2ec;
+        --sidebar-bg: #0c111c;
+        --sidebar-text: #9fb0c9;
+        --sidebar-title: #f4f8ff;
     }
 
     html, body, [class*="css"] {
-        font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
-        color: var(--text);
+        font-family: 'Space Grotesk', sans-serif;
+        color: var(--text-main);
     }
 
-    .stApp { background-color: var(--bg); }
+    .stApp {
+        background:
+            radial-gradient(circle at 10% -15%, rgba(14, 165, 233, 0.16), transparent 36%),
+            radial-gradient(circle at 90% -20%, rgba(245, 158, 11, 0.15), transparent 33%),
+            linear-gradient(160deg, #eef3f9 0%, #f9fbff 45%, #edf2f8 100%);
+    }
+    .stApp::before {
+        content: "";
+        position: fixed;
+        inset: 0;
+        pointer-events: none;
+        background-image: linear-gradient(rgba(17, 24, 39, 0.025) 1px, transparent 1px),
+                          linear-gradient(90deg, rgba(17, 24, 39, 0.025) 1px, transparent 1px);
+        background-size: 26px 26px;
+        z-index: 0;
+    }
 
-    /* --- SIDEBAR --- */
+    .block-container {
+        padding-top: 1.5rem;
+        position: relative;
+        z-index: 1;
+    }
+
     section[data-testid="stSidebar"] {
-        background-color: var(--sidebar-bg);
-        border-right: 1px solid #1e293b;
+        background:
+            radial-gradient(circle at 20% 0%, rgba(14, 165, 233, 0.18), transparent 32%),
+            linear-gradient(180deg, #0d1422 0%, #080d15 100%);
+        border-right: 1px solid #1e2a3f;
     }
     section[data-testid="stSidebar"] .stMarkdown,
     section[data-testid="stSidebar"] p,
@@ -89,191 +113,234 @@ st.markdown("""
     section[data-testid="stSidebar"] h1,
     section[data-testid="stSidebar"] h2,
     section[data-testid="stSidebar"] h3 {
-        color: var(--sidebar-heading) !important;
-        font-weight: 600;
-        letter-spacing: 0.3px;
+        color: var(--sidebar-title) !important;
+        font-family: 'Sora', sans-serif;
+        letter-spacing: 0.02em;
     }
     section[data-testid="stSidebar"] .stSelectbox > div > div,
     section[data-testid="stSidebar"] .stMultiSelect > div > div {
-        background-color: #1e293b;
-        color: white;
-        border: 1px solid #334155;
+        background: #111a2a;
+        border: 1px solid #243149;
+        color: #e2ebfa;
     }
     section[data-testid="stSidebar"] .stButton > button {
-        background: linear-gradient(90deg, var(--primary), var(--secondary));
+        background: linear-gradient(90deg, var(--accent-cyan), var(--accent-blue));
         color: white;
         border: none;
-        border-radius: 8px;
-        font-weight: 600;
-        padding: 10px 20px;
-        box-shadow: 0 4px 6px -1px rgba(99, 102, 241, 0.3);
-        transition: all 0.2s ease;
+        border-radius: 10px;
+        box-shadow: 0 10px 18px -10px rgba(37, 99, 235, 0.75);
+        transition: transform 0.2s ease, box-shadow 0.2s ease;
     }
     section[data-testid="stSidebar"] .stButton > button:hover {
-        background: linear-gradient(90deg, var(--primary-hover), #7c3aed);
-        box-shadow: 0 6px 10px -1px rgba(99, 102, 241, 0.4);
+        transform: translateY(-1px);
+        box-shadow: 0 14px 22px -12px rgba(14, 165, 233, 0.8);
     }
 
-    /* --- HEADER BANNER --- */
     .dashboard-header {
-        background: linear-gradient(135deg, #4f46e5 0%, #7c3aed 100%);
-        padding: 2.5rem 2rem;
-        border-radius: 16px;
-        color: white;
-        margin-bottom: 2rem;
-        box-shadow: 0 10px 25px -5px rgba(79, 70, 229, 0.4);
+        background: linear-gradient(120deg, rgba(13, 26, 46, 0.92) 0%, rgba(33, 55, 87, 0.88) 42%, rgba(14, 165, 233, 0.34) 100%);
+        border: 1px solid rgba(148, 163, 184, 0.35);
+        backdrop-filter: blur(6px);
+        padding: 2.8rem 2.2rem;
+        border-radius: 20px;
+        color: #e6efff;
+        margin-bottom: 1.9rem;
+        box-shadow: 0 28px 44px -34px rgba(15, 23, 42, 0.95);
         position: relative;
         overflow: hidden;
+        animation: heroEnter 0.8s ease-out 1;
     }
     .dashboard-header::before {
         content: "";
         position: absolute;
-        top: 0; left: 0; right: 0; bottom: 0;
-        background: url('https://www.transparenttextures.com/patterns/cubes.png');
-        opacity: 0.08;
+        top: -120%;
+        left: -25%;
+        width: 52%;
+        height: 320%;
+        background: linear-gradient(110deg, transparent 10%, rgba(255, 255, 255, 0.32) 45%, transparent 82%);
+        transform: rotate(8deg);
+        animation: sweep 7s linear infinite;
     }
     .dashboard-header h1 {
-        color: white !important;
-        font-size: 2.4rem !important;
-        font-weight: 800 !important;
-        margin: 0 0 0.5rem 0 !important;
+        color: #f8fbff !important;
+        font-family: 'Sora', sans-serif;
+        font-size: clamp(2rem, 3.2vw, 2.9rem) !important;
+        letter-spacing: -0.02em;
+        margin: 0 0 0.45rem 0 !important;
         position: relative;
+        z-index: 1;
     }
     .dashboard-header p {
-        color: #e0e7ff !important;
-        font-size: 1.05rem;
-        max-width: 640px;
+        color: #d8e4fa !important;
+        font-size: 1.03rem;
+        max-width: 760px;
         position: relative;
+        z-index: 1;
+        margin: 0;
+    }
+    .hero-chips {
+        position: relative;
+        z-index: 1;
+        display: flex;
+        gap: 0.55rem;
+        flex-wrap: wrap;
+        margin-top: 1rem;
+    }
+    .hero-chip {
+        background: rgba(148, 163, 184, 0.2);
+        color: #f4f8ff;
+        border: 1px solid rgba(226, 232, 240, 0.35);
+        border-radius: 999px;
+        padding: 0.35rem 0.75rem;
+        font-size: 0.76rem;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
     }
 
-    /* --- METRICS --- */
     div[data-testid="stMetric"] {
-        background-color: var(--card-bg);
-        padding: 16px 20px;
-        border-radius: 12px;
-        border: 1px solid var(--border-light);
-        box-shadow: 0 2px 4px rgba(0,0,0,0.02);
-        transition: all 0.2s ease;
+        background: linear-gradient(165deg, rgba(255, 255, 255, 0.92) 0%, rgba(242, 247, 255, 0.85) 100%);
+        border: 1px solid #d5deea;
+        border-radius: 14px;
+        padding: 15px 18px;
+        box-shadow: 0 14px 24px -21px rgba(30, 41, 59, 0.55);
+        transition: transform 0.22s ease, border-color 0.22s ease, box-shadow 0.22s ease;
     }
     div[data-testid="stMetric"]:hover {
-        border-color: var(--primary);
-        box-shadow: 0 4px 12px rgba(99, 102, 241, 0.12);
+        transform: translateY(-2px);
+        border-color: #8eb8ff;
+        box-shadow: 0 20px 30px -22px rgba(37, 99, 235, 0.65);
     }
     div[data-testid="stMetric"] label {
-        color: var(--text-secondary) !important;
-        font-size: 0.8rem !important;
-        font-weight: 600 !important;
+        color: var(--text-soft) !important;
+        font-size: 0.75rem !important;
+        letter-spacing: 0.06em;
         text-transform: uppercase;
-        letter-spacing: 0.05em;
-    }
-    div[data-testid="stMetric"] div[data-testid="stMetricValue"] {
-        color: var(--text) !important;
-        font-size: 1.75rem !important;
         font-weight: 700 !important;
     }
+    div[data-testid="stMetric"] div[data-testid="stMetricValue"] {
+        color: #0f172a !important;
+        font-family: 'Sora', sans-serif;
+        font-size: 1.62rem !important;
+    }
 
-    /* --- BUTTONS (main area) --- */
+    .stButton > button,
+    .stDownloadButton > button {
+        border-radius: 10px;
+        border: 1px solid rgba(148, 163, 184, 0.45);
+        padding: 0.55rem 1.05rem;
+        font-weight: 700;
+        transition: transform 0.18s ease, box-shadow 0.18s ease, border-color 0.18s ease;
+    }
     .stButton > button {
-        background: white;
-        color: var(--text);
-        border: 1px solid var(--border);
-        border-radius: 8px;
-        padding: 8px 16px;
-        font-weight: 600;
-        transition: all 0.2s;
+        background: linear-gradient(96deg, #f6f9ff 0%, #edf3fb 100%);
+        color: #0f172a;
     }
     .stButton > button:hover {
-        border-color: var(--primary);
-        color: var(--primary);
-        background: #f5f3ff;
+        border-color: #7caaff;
+        transform: translateY(-1px);
+        box-shadow: 0 10px 16px -11px rgba(14, 165, 233, 0.75);
     }
-
-    /* --- DOWNLOAD BUTTONS --- */
     .stDownloadButton > button {
-        background: linear-gradient(90deg, var(--success), #059669);
+        background: linear-gradient(95deg, var(--accent-cyan) 0%, var(--accent-blue) 64%, #1d4ed8 100%);
         color: white;
         border: none;
-        border-radius: 8px;
-        font-weight: 600;
-        padding: 10px 24px;
-        box-shadow: 0 4px 6px -1px rgba(16, 185, 129, 0.3);
-        transition: all 0.2s;
+        box-shadow: 0 18px 26px -17px rgba(37, 99, 235, 0.9);
     }
     .stDownloadButton > button:hover {
-        box-shadow: 0 6px 12px -1px rgba(16, 185, 129, 0.4);
+        transform: translateY(-1px);
+        box-shadow: 0 22px 30px -18px rgba(14, 165, 233, 0.92);
     }
 
-    /* --- TABS --- */
     .stTabs [data-baseweb="tab-list"] {
-        gap: 8px;
-        background-color: transparent;
-        padding-bottom: 8px;
-        border-bottom: 2px solid var(--border);
+        gap: 0.45rem;
+        border-bottom: 1px solid #d3deeb;
+        padding-bottom: 0.5rem;
     }
     .stTabs [data-baseweb="tab"] {
-        background-color: transparent;
-        border-radius: 6px;
-        padding: 8px 16px;
-        font-weight: 600;
-        color: var(--text-secondary);
-        border: none;
-        transition: all 0.2s;
+        border-radius: 10px;
+        padding: 0.48rem 0.95rem;
+        font-weight: 700;
+        color: #556277;
+        transition: all 0.2s ease;
     }
     .stTabs [data-baseweb="tab"]:hover {
-        color: var(--primary);
-        background-color: #f5f3ff;
+        color: #0f172a;
+        background: rgba(37, 99, 235, 0.08);
     }
     .stTabs [aria-selected="true"] {
-        background-color: white;
-        color: var(--primary) !important;
-        box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+        color: #ffffff !important;
+        background: linear-gradient(95deg, var(--accent-blue), var(--accent-cyan));
+        border: 1px solid rgba(14, 165, 233, 0.4);
+        box-shadow: 0 14px 22px -17px rgba(14, 165, 233, 0.9);
     }
 
-    /* --- EXPANDERS --- */
     .streamlit-expanderHeader {
-        font-weight: 600;
-        color: var(--text);
-        background-color: white;
-        border-radius: 8px;
+        border-radius: 10px;
+        border: 1px solid #dbe3ef;
+        font-weight: 700;
     }
-
-    /* --- CARDS --- */
     .ui-card {
-        background: var(--card-bg);
-        padding: 1.5rem;
-        border-radius: 12px;
-        border: 1px solid var(--border);
-        box-shadow: 0 1px 3px rgba(0,0,0,0.04);
+        background: linear-gradient(168deg, var(--surface-glass), rgba(243, 248, 255, 0.9));
+        border: 1px solid #d4deea;
+        border-radius: 14px;
+        box-shadow: 0 20px 34px -28px rgba(30, 41, 59, 0.65);
+        padding: 1.2rem;
         margin-bottom: 1rem;
-        transition: transform 0.2s, box-shadow 0.2s;
+        transition: transform 0.22s ease, border-color 0.22s ease, box-shadow 0.22s ease;
     }
     .ui-card:hover {
         transform: translateY(-2px);
-        box-shadow: 0 6px 12px rgba(0,0,0,0.06);
+        border-color: #9dc4ff;
+        box-shadow: 0 24px 36px -28px rgba(14, 165, 233, 0.8);
+    }
+    .ui-card h4 {
+        margin: 0 0 0.5rem 0;
+        font-family: 'Sora', sans-serif;
+        font-size: 1rem;
+        color: #0f172a;
+    }
+    .ui-card p {
+        margin: 0.18rem 0;
+        color: #4f5d73;
+        line-height: 1.36;
     }
 
-    /* --- FILE UPLOADER --- */
     section[data-testid="stFileUploadDropzone"] {
-        border-radius: 12px;
-        border: 2px dashed #cbd5e1;
-        background: white;
-        transition: all 0.2s;
+        border-radius: 14px;
+        border: 2px dashed #b7c7dc;
+        background: rgba(255, 255, 255, 0.7);
     }
     section[data-testid="stFileUploadDropzone"]:hover {
-        border-color: var(--primary);
-        background: #f5f3ff;
+        border-color: #5ca9ff;
+        background: rgba(240, 248, 255, 0.95);
     }
 
-    /* --- DATAFRAMES --- */
     .stDataFrame {
-        border-radius: 10px;
+        border-radius: 12px;
         overflow: hidden;
-        box-shadow: 0 2px 8px rgba(0,0,0,0.04);
+        border: 1px solid #d7e0ea;
+        box-shadow: 0 10px 20px -17px rgba(15, 23, 42, 0.5);
     }
 
-    /* --- MISC --- */
-    .block-container { padding-top: 2rem; }
-    hr { border: none; height: 1px; background: var(--border); margin: 1.5rem 0; }
+    hr {
+        border: none;
+        height: 1px;
+        background: linear-gradient(90deg, transparent, #c8d5e5, transparent);
+        margin: 1.4rem 0;
+    }
+
+    @keyframes sweep {
+        0% { transform: translateX(-120%) rotate(8deg); }
+        100% { transform: translateX(320%) rotate(8deg); }
+    }
+    @keyframes heroEnter {
+        from { opacity: 0; transform: translateY(10px); }
+        to { opacity: 1; transform: translateY(0); }
+    }
+
+    @media (max-width: 980px) {
+        .dashboard-header { padding: 2rem 1.4rem; }
+        .dashboard-header h1 { font-size: 1.8rem !important; }
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -1322,7 +1389,13 @@ def build_html_report(summary: dict) -> str:
 st.markdown("""
 <div class="dashboard-header">
     <h1>📊 Business Analytics Dashboard</h1>
-    <p>Interactive exploration, data quality diagnostics, and business insights from your CSV data.</p>
+    <p>Executive-grade AI analytics with grounded evidence, decision cards, and one-click board briefs.</p>
+    <div class="hero-chips">
+        <span class="hero-chip">Copilot Powered</span>
+        <span class="hero-chip">Evidence First</span>
+        <span class="hero-chip">Board Brief Ready</span>
+        <span class="hero-chip">Chrome UI</span>
+    </div>
 </div>
 """, unsafe_allow_html=True)
 
