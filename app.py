@@ -13,6 +13,11 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
+from briefing.generator import build_board_brief, board_brief_to_html, board_brief_to_markdown
+from copilot.contracts import ValidationError
+from copilot.executor import evaluate_kpi_specs, execute_query_plan
+from copilot.planner import generate_kpi_specs_with_gemini, plan_query_with_gemini
+from insights.decision_cards import generate_decision_cards
 
 # AI / ML imports (safe fallbacks)
 try:
@@ -770,57 +775,14 @@ def generate_ai_kpis(
     model, df: pd.DataFrame, numeric_cols: list[str],
     categorical_cols: list[str], datetime_cols: list[str],
 ) -> list[tuple[str, str, str]]:
-    """Use Gemini to generate smart, context-aware KPIs for any dataset."""
-    cols_info = []
-    for col in df.columns[:30]:  # Cap at 30 columns
-        dtype = str(df[col].dtype)
-        nunique = df[col].nunique(dropna=True)
-        sample_vals = df[col].dropna().head(3).tolist()
-        cols_info.append(f"  {col} ({dtype}, {nunique} unique): {sample_vals}")
-
-    prompt = (
-        "You are a data analyst. Given this dataset schema, generate exactly 5 KPI cards.\n"
-        f"Dataset: {df.shape[0]:,} rows, {df.shape[1]} columns.\n"
-        f"Columns:\n" + "\n".join(cols_info) + "\n\n"
-        "For each KPI, output exactly one line in this format:\n"
-        "LABEL | VALUE_EXPRESSION | HELP_TEXT\n\n"
-        "Rules:\n"
-        "- VALUE_EXPRESSION must be a pandas expression I can eval() on a DataFrame named 'df'.\n"
-        "  Examples: df['col'].mean(), df['col'].nunique(), len(df[df['col']>0])\n"
-        "- Use .median() over .mean() for robustness.\n"
-        "- Filter out obvious outliers (e.g., negative distances, impossible percentages).\n"
-        "- LABEL should be short (3-4 words max), human-friendly.\n"
-        "- HELP_TEXT should explain what the KPI means in plain English.\n"
-        "- Make KPIs meaningful for THIS specific data — not generic.\n"
-        "- Output ONLY the 5 lines, nothing else.\n"
-    )
-
+    """Use Gemini with a strict KPI JSON schema and local deterministic execution."""
+    _ = (numeric_cols, categorical_cols, datetime_cols)  # kept for compatibility with callers
     try:
-        resp = model.generate_content(prompt, generation_config={"max_output_tokens": 500, "temperature": 0.2})
-        lines = [ln.strip() for ln in resp.text.strip().split("\n") if "|" in ln]
-
-        ai_kpis: list[tuple[str, str, str]] = []
-        for line in lines[:5]:
-            parts = [p.strip() for p in line.split("|")]
-            if len(parts) < 3:
-                continue
-            label, expr, help_text = parts[0], parts[1], parts[2]
-            try:
-                result = eval(expr, {"__builtins__": {}, "df": df, "pd": pd, "np": np, "len": len, "abs": abs, "round": round})
-                # Format the result
-                if isinstance(result, float):
-                    if abs(result) >= 100:
-                        val_str = f"{result:,.0f}"
-                    elif abs(result) >= 1:
-                        val_str = f"{result:,.1f}"
-                    else:
-                        val_str = f"{result:,.3f}"
-                else:
-                    val_str = f"{result:,}" if isinstance(result, int) else str(result)[:24]
-                ai_kpis.append((label[:24], val_str, help_text))
-            except Exception:
-                continue  # Skip KPIs that fail to evaluate
-        return ai_kpis
+        specs, raw_response = generate_kpi_specs_with_gemini(model, df, max_items=5)
+        st.session_state["_ai_last_kpi_raw"] = raw_response[:6000]
+        if not specs:
+            return []
+        return evaluate_kpi_specs(df, specs, max_items=5)
     except Exception:
         return []
 
@@ -919,6 +881,48 @@ def get_palette_sequence(name: str) -> list[str]:
         "Set2": px.colors.qualitative.Set2,
     }
     return palettes.get(name, px.colors.qualitative.Plotly)
+
+
+@st.cache_data(show_spinner=False)
+def build_dataset_profile(df: pd.DataFrame) -> dict[str, float | int]:
+    if df.empty:
+        return {"rows": 0, "columns": 0, "missing_pct": 100.0}
+    return {
+        "rows": int(len(df)),
+        "columns": int(df.shape[1]),
+        "missing_pct": float(df.isna().mean().mean() * 100),
+    }
+
+
+def downsample_for_visuals(df: pd.DataFrame, max_points: int = 50_000) -> tuple[pd.DataFrame, bool]:
+    if len(df) <= max_points:
+        return df, False
+    sampled = df.sample(n=max_points, random_state=42).copy()
+    return sampled, True
+
+
+def schema_snapshot(df: pd.DataFrame) -> dict[str, str]:
+    return {col: str(dtype) for col, dtype in zip(df.columns.tolist(), df.dtypes.astype(str).tolist())}
+
+
+def compute_schema_drift_message(previous: dict[str, str], current: dict[str, str]) -> str | None:
+    prev_cols = set(previous.keys())
+    cur_cols = set(current.keys())
+    added = sorted(cur_cols - prev_cols)
+    removed = sorted(prev_cols - cur_cols)
+    common = prev_cols & cur_cols
+    dtype_changed = sorted(col for col in common if previous[col] != current[col])
+
+    if not added and not removed and not dtype_changed:
+        return None
+
+    union_size = max(1, len(prev_cols | cur_cols))
+    drift_ratio = (len(added) + len(removed) + len(dtype_changed)) / union_size * 100.0
+    return (
+        f"Schema drift detected ({drift_ratio:.1f}% change): "
+        f"+{len(added)} column(s), -{len(removed)} column(s), "
+        f"{len(dtype_changed)} dtype change(s)."
+    )
 
 
 def comparison_metrics_table(
@@ -1493,10 +1497,19 @@ data_raw = coerce_datetime_columns(data_raw)
 # --- Session State Init ---
 dataset_token = "|".join(f"{uf.name}:{uf.size}" for uf in uploaded_files)
 if st.session_state.get("dataset_token") != dataset_token:
+    previous_schema = st.session_state.get("_schema_snapshot")
+    current_schema = schema_snapshot(data_raw)
+    if isinstance(previous_schema, dict):
+        drift_message = compute_schema_drift_message(previous_schema, current_schema)
+        st.session_state["schema_drift_notice"] = drift_message
+    else:
+        st.session_state["schema_drift_notice"] = None
+
     st.session_state["dataset_token"] = dataset_token
     st.session_state["working_data"] = data_raw.copy()
     st.session_state["cleaning_history"] = []
     st.session_state["ai_kpis"] = None  # Reset AI KPIs for new dataset
+    st.session_state["_schema_snapshot"] = current_schema
 
     has_tesla = any("tesla" in fn.lower() for fn in file_names)
     default_source = "Tesla app CSV export" if has_tesla else "Uploaded CSV file"
@@ -1508,6 +1521,9 @@ if st.session_state.get("dataset_token") != dataset_token:
 
 if renamed_columns:
     st.toast(f"Renamed {len(renamed_columns)} duplicate column(s) to avoid ambiguity", icon="⚠️")
+
+if st.session_state.get("schema_drift_notice"):
+    st.warning(st.session_state["schema_drift_notice"])
 
 # --- Restore session from JSON (if provided) ---
 if session_file is not None:
@@ -1791,6 +1807,25 @@ if HAS_GEMINI and get_gemini_key():
             ai_cols[idx].metric(label, value, help=help_text)
         st.caption("Generated by Gemini based on your data's schema and values.")
 
+# --- Executive decision cards ---
+st.markdown("### 🧭 Executive Decision Cards")
+decision_cards = generate_decision_cards(data, filtered_data, numeric_cols, categorical_cols)
+dc_cols = st.columns(3)
+for idx, card in enumerate(decision_cards):
+    with dc_cols[idx]:
+        st.markdown(
+            (
+                "<div class='ui-card'>"
+                f"<h4>{card.title}</h4>"
+                f"<p><b>{card.metric_delta}</b></p>"
+                f"<p>{card.impact_estimate}</p>"
+                f"<p>{card.rationale}</p>"
+                f"<p><i>{card.evidence}</i></p>"
+                "</div>"
+            ),
+            unsafe_allow_html=True,
+        )
+
 # --- Filter status ---
 full_rows = len(data)
 filtered_rows = len(filtered_data)
@@ -1904,6 +1939,13 @@ with tab_viz:
     if filtered_data.empty:
         st.warning("No charts available — filtered dataset is empty.")
     else:
+        viz_data, viz_downsampled = downsample_for_visuals(filtered_data, max_points=50_000)
+        if viz_downsampled:
+            st.caption(
+                f"Charts are auto-downsampled to {len(viz_data):,} points from {len(filtered_data):,} "
+                "for responsiveness."
+            )
+
         # Controls row
         vc1, vc2, vc3 = st.columns(3)
         with vc1:
@@ -1933,7 +1975,7 @@ with tab_viz:
                         color_by = pick
 
                 hist_fig = px.histogram(
-                    filtered_data, x=hist_col, nbins=bins, color=color_by,
+                    viz_data, x=hist_col, nbins=bins, color=color_by,
                     title=f"Distribution of {hist_col}",
                     color_discrete_sequence=palette_sequence,
                 )
@@ -1953,7 +1995,7 @@ with tab_viz:
                 as_percent = st.toggle("Show as percent", value=False, key="viz_bar_pct")
 
                 if split_by == "(None)":
-                    series = filtered_data[cat_col].fillna("(Missing)").astype(str)
+                    series = viz_data[cat_col].fillna("(Missing)").astype(str)
                     vc = series.value_counts().head(top_n)
                     bar_df = vc.reset_index()
                     bar_df.columns = [cat_col, "count"]
@@ -1970,7 +2012,7 @@ with tab_viz:
                         color=y_field, color_continuous_scale="Bluyl",
                     )
                 else:
-                    split_df = filtered_data[[cat_col, split_by]].copy()
+                    split_df = viz_data[[cat_col, split_by]].copy()
                     split_df[cat_col] = split_df[cat_col].fillna("(Missing)").astype(str)
                     split_df[split_by] = split_df[split_by].fillna("(Missing)").astype(str)
 
@@ -2003,7 +2045,7 @@ with tab_viz:
         # --- Correlation ---
         st.subheader("Correlation (numeric)")
         if len(numeric_cols) >= 2:
-            corr = filtered_data[numeric_cols].corr(numeric_only=True)
+            corr = viz_data[numeric_cols].corr(numeric_only=True)
             corr_fig = px.imshow(
                 corr, text_auto=".2f", title="Correlation Matrix",
                 color_continuous_scale="RdBu_r", zmin=-1, zmax=1,
@@ -2068,7 +2110,7 @@ with tab_viz:
             with sc3:
                 max_points = st.slider("Max points", 200, 3000, 1500, 100, key="viz_scatter_n")
 
-            scatter_df = filtered_data[[x_col, y_col]].dropna().head(max_points)
+            scatter_df = viz_data[[x_col, y_col]].dropna().head(max_points)
             if scatter_df.empty:
                 st.info("Not enough non-null values for scatter plot.")
             else:
@@ -2222,20 +2264,17 @@ with tab_ai:
     st.markdown("### 💬 Chat With Your Data")
     if gemini_ready:
         st.caption(
-            "Ask questions about your data in plain English. "
-            "Only column names, summary stats, and 5 sample rows are sent to the AI — never the full dataset."
+            "Ask questions in plain English. Copilot uses structured JSON planning and local deterministic "
+            "execution so responses are evidence-backed."
         )
 
-        # Initialize chat history
         if "ai_chat_history" not in st.session_state:
             st.session_state["ai_chat_history"] = []
 
-        # Display chat history
         for msg in st.session_state["ai_chat_history"]:
             with st.chat_message(msg["role"]):
                 st.markdown(msg["content"])
 
-        # Chat input
         user_question = st.chat_input("Ask about your data... e.g. 'Which routes use the most energy?'")
         if user_question:
             st.session_state["ai_chat_history"].append({"role": "user", "content": user_question})
@@ -2244,31 +2283,98 @@ with tab_ai:
 
             with st.chat_message("assistant"):
                 with st.spinner("Thinking..."):
+                    answer = ""
                     try:
                         model = init_gemini(gemini_key)
-                        system_prompt = (
-                            "You are a data analyst assistant embedded in a business analytics dashboard. "
-                            "Answer questions about the user's dataset concisely and accurately. "
-                            "Use the data context provided. Format responses with markdown. "
-                            "If you cannot determine something from the data, say so.\n\n"
-                            f"DATA CONTEXT:\n{ai_context}"
-                        )
-                        # Build conversation for multi-turn
-                        messages = [{"role": "user", "parts": [system_prompt]}]
-                        messages.append({"role": "model", "parts": ["Understood. I have your dataset context. Ask me anything about your data."]})
-                        for past in st.session_state["ai_chat_history"][:-1]:
-                            role = "user" if past["role"] == "user" else "model"
-                            messages.append({"role": role, "parts": [past["content"]]})
-                        messages.append({"role": "user", "parts": [user_question]})
+                        st.session_state["_ai_last_model_name"] = st.session_state.get("_gemini_model_name", "unknown")
+                        st.session_state["_ai_last_run_at"] = datetime.now().isoformat(timespec="seconds")
+                        profile = build_dataset_profile(filtered_data)
+                        st.session_state["_ai_last_rows_used"] = int(profile["rows"])
+                        st.session_state["_ai_last_columns_used"] = int(profile["columns"])
+                        st.session_state["_ai_last_missingness"] = float(profile["missing_pct"])
 
-                        chat = model.start_chat(history=messages[:-1])
-                        response = chat.send_message(user_question)
-                        answer = response.text
+                        try:
+                            query_plan, raw_plan = plan_query_with_gemini(
+                                model,
+                                question=user_question,
+                                context=ai_context,
+                                df=filtered_data,
+                                numeric_cols=numeric_cols,
+                                categorical_cols=categorical_cols,
+                                datetime_cols=datetime_cols,
+                            )
+                            st.session_state["_ai_last_prompt_mode"] = "structured_json"
+                            st.session_state["_ai_last_plan_raw"] = raw_plan[:6000]
+
+                            copilot_answer = execute_query_plan(
+                                data, filtered_data, query_plan, evidence_limit=200
+                            )
+                            answer = (
+                                f"### {copilot_answer.headline}\n\n"
+                                + "\n".join(f"- {bullet}" for bullet in copilot_answer.bullets[:4])
+                                + f"\n\n**Confidence:** {copilot_answer.confidence}"
+                            )
+                            st.markdown(answer)
+
+                            evidence_df = copilot_answer.evidence_df.head(200)
+                            if not evidence_df.empty:
+                                st.markdown("**Evidence (local deterministic computation):**")
+                                st.dataframe(evidence_df, use_container_width=True, height=260)
+
+                            if (
+                                copilot_answer.chart_spec.get("type") == "bar"
+                                and not evidence_df.empty
+                            ):
+                                x_col = copilot_answer.chart_spec.get("x")
+                                y_col = copilot_answer.chart_spec.get("y")
+                                if x_col in evidence_df.columns and y_col in evidence_df.columns:
+                                    evidence_fig = px.bar(
+                                        evidence_df.head(12),
+                                        x=x_col,
+                                        y=y_col,
+                                        title=f"Evidence breakdown by {x_col}",
+                                        color_discrete_sequence=get_palette_sequence("Safe"),
+                                    )
+                                    st.plotly_chart(update_chart_design(evidence_fig, height=340), use_container_width=True)
+
+                            if copilot_answer.assumptions:
+                                with st.expander("Copilot assumptions", expanded=False):
+                                    for item in copilot_answer.assumptions:
+                                        st.write(f"• {item}")
+
+                        except ValidationError:
+                            st.session_state["_ai_last_prompt_mode"] = "fallback_text"
+                            fallback_prompt = (
+                                "You are a senior data analyst. Provide a concise executive answer in markdown with:\n"
+                                "1) One headline\n2) Three bullet insights with numbers\n3) One action recommendation.\n\n"
+                                f"DATA CONTEXT:\n{ai_context}\n\nQUESTION:\n{user_question}"
+                            )
+                            fallback_resp = model.generate_content(
+                                fallback_prompt,
+                                generation_config={"max_output_tokens": 500, "temperature": 0.2},
+                            )
+                            answer = fallback_resp.text
+                            st.warning("Structured plan validation failed; using text fallback.")
+                            st.markdown(answer)
+                        except Exception as exec_err:
+                            st.session_state["_ai_last_prompt_mode"] = "fallback_text"
+                            fallback_prompt = (
+                                "Provide a concise executive summary answer with one headline and three numeric bullets.\n\n"
+                                f"DATA CONTEXT:\n{ai_context}\n\nQUESTION:\n{user_question}"
+                            )
+                            fallback_resp = model.generate_content(
+                                fallback_prompt,
+                                generation_config={"max_output_tokens": 400, "temperature": 0.2},
+                            )
+                            answer = fallback_resp.text
+                            st.warning(f"Planner/executor fallback triggered: {exec_err}")
+                            st.markdown(answer)
                     except Exception as e:
                         answer = f"Error communicating with Gemini: {e}"
+                        st.error(answer)
 
-                st.markdown(answer)
-                st.session_state["ai_chat_history"].append({"role": "assistant", "content": answer})
+                if answer:
+                    st.session_state["ai_chat_history"].append({"role": "assistant", "content": answer})
 
         if st.session_state.get("ai_chat_history"):
             if st.button("Clear chat history", key="ai_clear_chat"):
@@ -2276,6 +2382,26 @@ with tab_ai:
                 st.rerun()
     else:
         st.caption("Configure your Gemini API key in the sidebar to enable data chat.")
+
+    st.markdown("### 🛡️ Trust & Transparency")
+    profile = build_dataset_profile(filtered_data)
+    if gemini_ready:
+        tt1, tt2, tt3, tt4, tt5 = st.columns(5)
+        tt1.metric("Rows used", f"{int(st.session_state.get('_ai_last_rows_used', profile['rows'])):,}")
+        tt2.metric("Columns used", f"{int(st.session_state.get('_ai_last_columns_used', profile['columns'])):,}")
+        tt3.metric("Missingness impact", f"{float(st.session_state.get('_ai_last_missingness', profile['missing_pct'])):.1f}%")
+        tt4.metric("Prompt mode", str(st.session_state.get("_ai_last_prompt_mode", "n/a")))
+        tt5.metric("Model", str(st.session_state.get("_ai_last_model_name", st.session_state.get("_gemini_model_name", "unknown"))))
+        st.caption(f"Last AI run: {st.session_state.get('_ai_last_run_at', 'not run yet')}")
+    else:
+        tt1, tt2, tt3 = st.columns(3)
+        tt1.metric("Rows used", f"{int(profile['rows']):,}")
+        tt2.metric("Columns used", f"{int(profile['columns']):,}")
+        tt3.metric("Missingness impact", f"{float(profile['missing_pct']):.1f}%")
+        st.caption("Model: not configured | Prompt mode: n/a | Last AI run: not run yet")
+
+    with st.expander("Raw planner response (debug)", expanded=False):
+        st.code(st.session_state.get("_ai_last_plan_raw", "No structured plan generated yet."), language="json")
 
     st.divider()
 
@@ -2512,6 +2638,18 @@ with tab_export:
     if filtered_data.empty:
         st.warning("Filtered dataset is empty — nothing to export.")
     else:
+        source_info = {
+            "source_system": st.session_state.get("src_system", ""),
+            "export_date": st.session_state.get("src_export_date", ""),
+            "owner": st.session_state.get("src_owner", ""),
+            "source_url": st.session_state.get("src_url", ""),
+            "limitations": st.session_state.get("src_limitations", ""),
+        }
+        insights_for_export = generate_findings(data, filtered_data, numeric_cols, categorical_cols, datetime_cols)
+        summary = build_summary_payload(
+            data, filtered_data, filter_summaries, insights_for_export, meta, source_info, datetime_cols,
+        )
+
         col_ex1, col_ex2 = st.columns(2)
         with col_ex1:
             csv_bytes = filtered_data.to_csv(index=False).encode("utf-8")
@@ -2520,17 +2658,6 @@ with tab_export:
                 "filtered_data.csv", "text/csv", use_container_width=True,
             )
         with col_ex2:
-            source_info = {
-                "source_system": st.session_state.get("src_system", ""),
-                "export_date": st.session_state.get("src_export_date", ""),
-                "owner": st.session_state.get("src_owner", ""),
-                "source_url": st.session_state.get("src_url", ""),
-                "limitations": st.session_state.get("src_limitations", ""),
-            }
-            insights = generate_findings(data, filtered_data, numeric_cols, categorical_cols, datetime_cols)
-            summary = build_summary_payload(
-                data, filtered_data, filter_summaries, insights, meta, source_info, datetime_cols,
-            )
             summary_json = json.dumps(summary, indent=2)
             st.download_button(
                 "Download summary (JSON)", summary_json,
@@ -2549,6 +2676,45 @@ with tab_export:
                 "Download README", build_readme_text(),
                 "README.md", "text/markdown", use_container_width=True,
             )
+
+        st.markdown("### 🧾 Board Brief")
+        st.caption("Generate an executive-ready brief with KPI snapshot, decisions, risks, assumptions, and a 7-day action plan.")
+        if st.button("Generate Board Brief", key="export_generate_board_brief", type="primary", use_container_width=True):
+            brief = build_board_brief(
+                total_rows=len(data),
+                filtered_rows=len(filtered_data),
+                columns=int(data.shape[1]),
+                kpis=kpis,
+                decision_cards=decision_cards,
+                insights=insights_for_export,
+                filters=filter_summaries,
+                source_info=source_info,
+            )
+            st.session_state["board_brief_md"] = board_brief_to_markdown(brief)
+            st.session_state["board_brief_html"] = board_brief_to_html(brief)
+            st.session_state["board_brief_generated_at"] = brief.generated_at
+
+        if st.session_state.get("board_brief_md"):
+            st.success(f"Board brief generated at {st.session_state.get('board_brief_generated_at', 'unknown time')}.")
+            with st.expander("Preview board brief", expanded=False):
+                st.markdown(st.session_state["board_brief_md"])
+            bb1, bb2 = st.columns(2)
+            with bb1:
+                st.download_button(
+                    "Download board brief (Markdown)",
+                    st.session_state["board_brief_md"],
+                    "board_brief.md",
+                    "text/markdown",
+                    use_container_width=True,
+                )
+            with bb2:
+                st.download_button(
+                    "Download board brief (HTML)",
+                    st.session_state["board_brief_html"],
+                    "board_brief.html",
+                    "text/html",
+                    use_container_width=True,
+                )
 
         st.caption(
             f"Export includes {len(filtered_data):,} rows, {filtered_data.shape[1]} columns, "
