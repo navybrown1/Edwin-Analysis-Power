@@ -1391,10 +1391,8 @@ st.markdown("""
     <h1>📊 Business Analytics Dashboard</h1>
     <p>Executive-grade AI analytics with grounded evidence, decision cards, and one-click board briefs.</p>
     <div class="hero-chips">
-        <span class="hero-chip">Copilot Powered</span>
         <span class="hero-chip">Evidence First</span>
         <span class="hero-chip">Board Brief Ready</span>
-        <span class="hero-chip">Chrome UI</span>
     </div>
 </div>
 """, unsafe_allow_html=True)
