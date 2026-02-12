@@ -37,6 +37,7 @@ except ImportError:
 # =============================================================================
 
 MAX_UPLOAD_MB = 200
+SUPPORTED_UPLOAD_TYPES = ["csv", "xlsx", "xls", "pdf", "docx", "png", "jpg", "jpeg"]
 
 st.set_page_config(
     page_title="Business Analytics Dashboard",
@@ -582,6 +583,275 @@ def read_csv_bytes(file_bytes: bytes) -> tuple[pd.DataFrame, dict]:
             except Exception:
                 continue
     raise ValueError("Could not parse the CSV with supported encodings and delimiters.")
+
+
+def _rows_to_dataframe(rows: list[list[str]]) -> pd.DataFrame:
+    cleaned_rows: list[list[str]] = []
+    for row in rows:
+        if not row:
+            continue
+        normalized = ["" if cell is None else str(cell).strip() for cell in row]
+        if any(cell != "" for cell in normalized):
+            cleaned_rows.append(normalized)
+
+    if not cleaned_rows:
+        return pd.DataFrame()
+
+    max_len = max(len(r) for r in cleaned_rows)
+    padded = [r + [""] * (max_len - len(r)) for r in cleaned_rows]
+    first = padded[0]
+    non_empty = [c for c in first if c]
+    header_is_valid = (
+        len(non_empty) >= max(2, max_len // 2)
+        and len(set(c.lower() for c in non_empty)) == len(non_empty)
+    )
+
+    if header_is_valid and len(padded) > 1:
+        headers = [c if c else f"column_{i + 1}" for i, c in enumerate(first)]
+        data_rows = padded[1:]
+    else:
+        headers = [f"column_{i + 1}" for i in range(max_len)]
+        data_rows = padded
+
+    return pd.DataFrame(data_rows, columns=headers)
+
+
+def _text_lines_to_dataframe(lines: list[str]) -> pd.DataFrame:
+    cleaned = [ln.strip() for ln in lines if isinstance(ln, str) and ln.strip()]
+    if not cleaned:
+        return pd.DataFrame()
+
+    best_sep = None
+    best_score = 0.0
+    for sep in [",", "\t", ";", "|"]:
+        counts = [ln.count(sep) for ln in cleaned[:200]]
+        usable = [c for c in counts if c > 0]
+        if len(usable) < 3:
+            continue
+        score = float(len(usable)) * float(sum(usable) / len(usable))
+        if score > best_score:
+            best_score = score
+            best_sep = sep
+
+    if best_sep:
+        split_rows = [ln.split(best_sep) for ln in cleaned]
+        df = _rows_to_dataframe(split_rows)
+        if not df.empty and df.shape[1] > 1:
+            return df
+
+    return pd.DataFrame({"text_line": cleaned})
+
+
+@st.cache_data(show_spinner=False)
+def read_excel_bytes(file_bytes: bytes) -> tuple[pd.DataFrame, dict]:
+    try:
+        workbook = pd.ExcelFile(io.BytesIO(file_bytes), engine="openpyxl")
+    except Exception as exc:
+        raise ValueError(f"Could not open Excel workbook: {exc}") from exc
+
+    frames: list[pd.DataFrame] = []
+    parsed_sheets: list[str] = []
+    for sheet in workbook.sheet_names:
+        try:
+            sheet_df = workbook.parse(sheet_name=sheet)
+        except Exception:
+            continue
+        if sheet_df is None or sheet_df.empty:
+            continue
+        sheet_df = sheet_df.dropna(how="all").copy()
+        if sheet_df.empty:
+            continue
+        sheet_df["Source Sheet"] = sheet
+        frames.append(sheet_df)
+        parsed_sheets.append(sheet)
+
+    if not frames:
+        raise ValueError("No usable rows found in Excel workbook sheets.")
+
+    out = pd.concat(frames, ignore_index=True)
+    return out, {
+        "encoding": "binary",
+        "delimiter": "n/a",
+        "format": "excel",
+        "sheets": ", ".join(parsed_sheets[:10]),
+    }
+
+
+@st.cache_data(show_spinner=False)
+def read_pdf_bytes(file_bytes: bytes) -> tuple[pd.DataFrame, dict]:
+    try:
+        import pdfplumber  # type: ignore
+    except Exception as exc:
+        raise ValueError(
+            "PDF parsing requires `pdfplumber`. Add it to requirements and redeploy."
+        ) from exc
+
+    table_frames: list[pd.DataFrame] = []
+    text_lines: list[str] = []
+    page_count = 0
+    table_count = 0
+
+    with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
+        for page_idx, page in enumerate(pdf.pages, start=1):
+            page_count += 1
+            page_tables = page.extract_tables() or []
+            for table_idx, table in enumerate(page_tables, start=1):
+                df_table = _rows_to_dataframe(table)
+                if df_table.empty:
+                    continue
+                df_table["_pdf_page"] = page_idx
+                df_table["_pdf_table"] = table_idx
+                table_frames.append(df_table)
+                table_count += 1
+
+            text = page.extract_text() or ""
+            if text.strip():
+                for line in text.splitlines():
+                    if line.strip():
+                        text_lines.append(line.strip())
+
+    if table_frames:
+        out = pd.concat(table_frames, ignore_index=True)
+        return out, {
+            "encoding": "binary",
+            "delimiter": "n/a",
+            "format": "pdf_table",
+            "pages": str(page_count),
+            "tables_extracted": str(table_count),
+        }
+
+    text_df = _text_lines_to_dataframe(text_lines)
+    if text_df.empty:
+        raise ValueError("No extractable text or tables found in PDF.")
+
+    return text_df, {
+        "encoding": "binary",
+        "delimiter": "n/a",
+        "format": "pdf_text",
+        "pages": str(page_count),
+    }
+
+
+@st.cache_data(show_spinner=False)
+def read_docx_bytes(file_bytes: bytes) -> tuple[pd.DataFrame, dict]:
+    try:
+        from docx import Document  # type: ignore
+    except Exception as exc:
+        raise ValueError(
+            "DOCX parsing requires `python-docx`. Add it to requirements and redeploy."
+        ) from exc
+
+    doc = Document(io.BytesIO(file_bytes))
+    table_frames: list[pd.DataFrame] = []
+    for idx, table in enumerate(doc.tables, start=1):
+        rows = [[cell.text for cell in row.cells] for row in table.rows]
+        df_table = _rows_to_dataframe(rows)
+        if df_table.empty:
+            continue
+        df_table["_doc_table"] = idx
+        table_frames.append(df_table)
+
+    paragraphs = [p.text.strip() for p in doc.paragraphs if p.text and p.text.strip()]
+    if table_frames:
+        out = pd.concat(table_frames, ignore_index=True)
+        return out, {
+            "encoding": "utf-8",
+            "delimiter": "n/a",
+            "format": "docx_table",
+            "paragraphs": str(len(paragraphs)),
+            "tables_extracted": str(len(table_frames)),
+        }
+
+    text_df = _text_lines_to_dataframe(paragraphs)
+    if text_df.empty:
+        raise ValueError("No extractable text or tables found in DOCX.")
+    return text_df, {
+        "encoding": "utf-8",
+        "delimiter": "n/a",
+        "format": "docx_text",
+        "paragraphs": str(len(paragraphs)),
+    }
+
+
+def read_image_with_gemini(file_bytes: bytes, mime_type: str) -> tuple[pd.DataFrame, dict]:
+    if not HAS_GEMINI:
+        raise ValueError("Image parsing requires Gemini support (`google-generativeai`).")
+    api_key = get_gemini_key()
+    if not api_key:
+        raise ValueError("Image parsing requires a Gemini API key in Streamlit secrets or sidebar.")
+
+    model = init_gemini(api_key)
+    prompt = (
+        "Extract structured data from this image. Return ONLY JSON in one object using:\n"
+        '{"headers":["..."],"rows":[["..."]],"text_lines":["..."]}\n'
+        "Rules:\n"
+        "- If tabular structure exists, provide headers and rows.\n"
+        "- If no clear table, provide text_lines.\n"
+        "- No markdown or explanations."
+    )
+    response = model.generate_content(
+        [prompt, {"mime_type": mime_type, "data": file_bytes}],
+        generation_config={"max_output_tokens": 1500, "temperature": 0.0},
+    )
+    parsed = _extract_json_object(response.text if hasattr(response, "text") else str(response))
+    if not parsed:
+        raise ValueError("Could not parse structured JSON from image extraction.")
+
+    headers = parsed.get("headers", [])
+    rows = parsed.get("rows", [])
+    if isinstance(headers, list) and isinstance(rows, list) and rows:
+        normalized_rows: list[list[str]] = []
+        for row in rows:
+            if not isinstance(row, list):
+                continue
+            normalized_rows.append([str(cell) for cell in row])
+        if normalized_rows:
+            max_len = max(len(r) for r in normalized_rows)
+            normalized_rows = [r + [""] * (max_len - len(r)) for r in normalized_rows]
+            if isinstance(headers, list) and len(headers) >= 2:
+                hdr = [str(h).strip() if str(h).strip() else f"column_{i + 1}" for i, h in enumerate(headers[:max_len])]
+                if len(hdr) < max_len:
+                    hdr += [f"column_{i + 1}" for i in range(len(hdr), max_len)]
+                df = pd.DataFrame(normalized_rows, columns=hdr)
+            else:
+                df = _rows_to_dataframe(normalized_rows)
+            if not df.empty:
+                return df, {"encoding": "binary", "delimiter": "n/a", "format": "image_table_gemini"}
+
+    text_lines = parsed.get("text_lines", [])
+    if isinstance(text_lines, list):
+        df = _text_lines_to_dataframe([str(x) for x in text_lines])
+        if not df.empty:
+            return df, {"encoding": "utf-8", "delimiter": "n/a", "format": "image_text_gemini"}
+
+    raise ValueError("Image extraction returned no usable rows.")
+
+
+def parse_uploaded_file(uploaded_file) -> tuple[pd.DataFrame, dict]:
+    file_name = uploaded_file.name
+    extension = os.path.splitext(file_name)[1].lower()
+    raw_bytes = uploaded_file.getvalue()
+
+    if extension == ".csv":
+        df, meta = read_csv_bytes(raw_bytes)
+    elif extension in {".xlsx", ".xls"}:
+        df, meta = read_excel_bytes(raw_bytes)
+    elif extension == ".pdf":
+        df, meta = read_pdf_bytes(raw_bytes)
+    elif extension == ".docx":
+        df, meta = read_docx_bytes(raw_bytes)
+    elif extension in {".png", ".jpg", ".jpeg"}:
+        mime_type = uploaded_file.type or ("image/png" if extension == ".png" else "image/jpeg")
+        df, meta = read_image_with_gemini(raw_bytes, mime_type)
+    elif extension == ".doc":
+        raise ValueError("Legacy .doc format is not supported directly. Please convert to .docx or .pdf.")
+    else:
+        raise ValueError(f"Unsupported file type: {extension}.")
+
+    meta = dict(meta)
+    meta["format"] = meta.get("format", extension.replace(".", ""))
+    meta["filename"] = file_name
+    return df, meta
 
 
 def make_unique_columns(df: pd.DataFrame) -> tuple[pd.DataFrame, list[tuple[str, str]]]:
@@ -1436,7 +1706,7 @@ def build_readme_text() -> str:
     return """# Streamlit Analytics Dashboard
 
 ## Overview
-Interactive analytics dashboard for uploaded CSV files with business framing, filtering, cleaning, visualizations, findings, and exports.
+Interactive analytics dashboard for uploaded business documents/data files with business framing, filtering, cleaning, visualizations, findings, and exports.
 
 ## Setup
 1. `python3 -m venv .venv`
@@ -1447,9 +1717,10 @@ Interactive analytics dashboard for uploaded CSV files with business framing, fi
 `streamlit run app.py --server.port 8501 --server.address 127.0.0.1`
 
 ## Input Format
-- Any CSV schema is supported.
-- Best results when headers are present.
+- Supported formats: CSV, XLSX/XLS, PDF, DOCX, PNG/JPG.
+- Best results when tabular data has clear headers.
 - Datetime columns are auto-detected where possible.
+- Image extraction uses Gemini and requires an API key.
 
 ## Key Features
 - Data quality diagnostics and missing-value recommendations
@@ -1459,7 +1730,8 @@ Interactive analytics dashboard for uploaded CSV files with business framing, fi
 - Cleaning actions: drop missing, deduplicate, fill missing, type conversion, text cleaning
 
 ## Troubleshooting
-- If upload fails, confirm file is CSV and below 200MB.
+- If upload fails, confirm file type is supported and below 200MB.
+- For PDF parsing install `pdfplumber`; for DOCX parsing install `python-docx`.
 - If filters return no rows, click "Clear all filters".
 - If charts are empty, verify at least one numeric/categorical column exists.
 """
@@ -1922,8 +2194,8 @@ col_upload_1, col_upload_2 = st.columns([1, 2])
 with col_upload_1:
     st.markdown("### 📂 Data Import")
     uploaded_files = st.file_uploader(
-        "Upload one or more CSV files",
-        type=["csv"],
+        "Upload one or more files (CSV, XLSX, PDF, DOCX, PNG/JPG)",
+        type=SUPPORTED_UPLOAD_TYPES,
         accept_multiple_files=True,
         label_visibility="collapsed",
     )
@@ -1937,9 +2209,9 @@ with col_upload_1:
 if not uploaded_files:
     with col_upload_2:
         st.info(
-            "👋 **Welcome!** Upload one or more CSV files to begin. "
-            "The dashboard auto-detects schema, data types, and datetime columns. "
-            "Upload multiple files to stack or merge them."
+            "👋 **Welcome!** Upload one or more files to begin. "
+            "Supported formats: CSV, XLSX/XLS, PDF, DOCX, PNG/JPG. "
+            "The app extracts tabular/text data, auto-detects schema and datetimes, and can combine multiple files."
         )
     st.stop()
 
@@ -1949,13 +2221,12 @@ parsed_metas: list[dict] = []
 file_names: list[str] = []
 for uf in uploaded_files:
     if uf.size > MAX_UPLOAD_MB * 1024 * 1024:
-        st.error(f"**{uf.name}** exceeds {MAX_UPLOAD_MB}MB limit. Please upload a smaller CSV.")
+        st.error(f"**{uf.name}** exceeds {MAX_UPLOAD_MB}MB limit. Please upload a smaller file.")
         st.stop()
     try:
-        raw_bytes = uf.getvalue()
-        df_i, meta_i = read_csv_bytes(raw_bytes)
+        df_i, meta_i = parse_uploaded_file(uf)
     except Exception as exc:
-        st.error(f"Could not read **{uf.name}** as a CSV. Check delimiter, encoding, and file format.")
+        st.error(f"Could not read **{uf.name}**. Check file format, structure, and parser requirements.")
         st.exception(exc)
         st.stop()
     if df_i is None or df_i.shape[1] == 0:
@@ -3359,7 +3630,8 @@ with tab_export:
 with tab_help:
     st.subheader("How to Use This Dashboard")
     st.markdown(
-        "1. **Upload CSV(s)** — Upload one or more CSV files. Multiple files can be stacked (same columns) or merged (shared key column)\n"
+        "1. **Upload files** — Upload one or more supported files (CSV, XLSX/XLS, PDF, DOCX, PNG/JPG). "
+        "Multiple tabular files can be stacked (same columns) or merged (shared key column)\n"
         "2. **Restore session** — Optionally upload a `dashboard_session.json` to restore a previous session's context and history\n"
         "3. **Clean data** — Optionally clean data from the sidebar (remove outliers, fill missing, etc.)\n"
         "4. **Apply filters** — Filter categorical, numeric, and date columns\n"
@@ -3373,12 +3645,14 @@ with tab_help:
     st.write("• Keep filters narrow for focused insights, broad for trend analysis")
 
     st.markdown("**Expected input**")
-    st.write("• CSV with headers")
+    st.write("• Supported types: CSV, XLSX/XLS, PDF, DOCX, PNG/JPG")
+    st.write("• For image extraction (PNG/JPG), configure Gemini API key")
     st.write("• Mixed data types are supported")
     st.write("• Datetime columns are auto-detected when parse confidence is high")
 
     st.markdown("**Troubleshooting**")
-    st.write("• Upload errors: verify file is CSV and below 200MB")
+    st.write("• Upload errors: verify file type is supported and below 200MB")
+    st.write("• PDF/DOCX parsing: ensure `pdfplumber` and `python-docx` are installed")
     st.write("• Empty charts: verify required numeric/categorical columns exist")
     st.write("• Unexpected results: review cleaning history and active filters")
 
