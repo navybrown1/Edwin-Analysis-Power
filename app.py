@@ -715,6 +715,16 @@ def find_column(columns: list[str], candidates: list[str]) -> str | None:
 
 def infer_schema_description(column_name: str) -> str:
     col = column_name.lower()
+    if "debit" in col:
+        return "Debit / cash outflow amount"
+    if "credit" in col:
+        return "Credit / cash inflow amount"
+    if "balance" in col:
+        return "Balance state metric"
+    if "transaction" in col and "date" in col:
+        return "Transaction timestamp"
+    if "description" in col or "merchant" in col or "category" in col:
+        return "Transaction descriptor"
     if "start" in col and "location" in col:
         return "Trip starting location"
     if "end" in col and "location" in col:
@@ -738,6 +748,304 @@ def infer_schema_description(column_name: str) -> str:
     return "General data field"
 
 
+DOMAIN_KEYWORDS: dict[str, list[str]] = {
+    "banking": [
+        "debit", "credit", "transaction", "balance", "account", "merchant", "payee",
+        "statement", "routing", "withdrawal", "deposit", "checking", "savings",
+    ],
+    "sales": [
+        "revenue", "order", "customer", "sku", "product", "price", "invoice", "quantity",
+        "sales", "gmv", "margin",
+    ],
+    "marketing": [
+        "campaign", "click", "impression", "ctr", "cpc", "ad", "conversion", "lead",
+        "channel", "spend",
+    ],
+    "operations": [
+        "ticket", "sla", "incident", "resolution", "queue", "latency", "downtime",
+        "throughput", "utilization",
+    ],
+    "mobility_ev": [
+        "battery", "tesla", "trip", "route", "wh/mi", "kwh", "charging", "odometer",
+        "starting location", "ending location",
+    ],
+}
+
+DOMAIN_LABELS: dict[str, str] = {
+    "banking": "Banking Transactions",
+    "sales": "Sales / Commerce",
+    "marketing": "Marketing Performance",
+    "operations": "Operations / Service",
+    "mobility_ev": "Mobility / EV Telemetry",
+    "generic": "General Business Dataset",
+}
+
+DOMAIN_DEFAULT_LIMITATIONS: dict[str, str] = {
+    "banking": "Transaction descriptions/categories may be inconsistent and require manual normalization.",
+    "sales": "SKU and channel naming may be inconsistent across data sources.",
+    "marketing": "Attribution fields may be incomplete or affected by tracking gaps.",
+    "operations": "Ticket categories and SLA tags may vary by team/process.",
+    "mobility_ev": "Route names and trip tags may be user-entered and inconsistent.",
+    "generic": "Column semantics are inferred from headers; validate business definitions before decisions.",
+}
+
+
+def _extract_json_object(text: str) -> dict | None:
+    cleaned = text.strip()
+    if cleaned.startswith("```"):
+        lines = [ln for ln in cleaned.splitlines() if not ln.strip().startswith("```")]
+        cleaned = "\n".join(lines).strip()
+
+    try:
+        out = json.loads(cleaned)
+        if isinstance(out, dict):
+            return out
+    except Exception:
+        pass
+
+    start = cleaned.find("{")
+    end = cleaned.rfind("}")
+    if start == -1 or end == -1 or start >= end:
+        return None
+
+    for idx in range(end, start, -1):
+        candidate = cleaned[start : idx + 1]
+        try:
+            out = json.loads(candidate)
+            if isinstance(out, dict):
+                return out
+        except Exception:
+            continue
+    return None
+
+
+def infer_dataset_context(df: pd.DataFrame, file_names: list[str] | None = None) -> dict[str, str]:
+    file_names = file_names or []
+    cols = [c.lower() for c in df.columns.tolist()]
+    file_blob = " ".join(fn.lower() for fn in file_names)
+
+    scores: dict[str, int] = {}
+    matches: dict[str, list[str]] = {}
+    for domain, keywords in DOMAIN_KEYWORDS.items():
+        hit_words: list[str] = []
+        for kw in keywords:
+            if any(kw in col for col in cols) or kw in file_blob:
+                hit_words.append(kw)
+        scores[domain] = len(set(hit_words))
+        matches[domain] = sorted(set(hit_words))
+
+    if not scores:
+        domain = "generic"
+    else:
+        domain = max(scores, key=scores.get)
+        if scores[domain] == 0:
+            domain = "generic"
+
+    top_score = scores.get(domain, 0)
+    if top_score >= 6:
+        confidence = "High"
+    elif top_score >= 3:
+        confidence = "Medium"
+    else:
+        confidence = "Low"
+
+    matched = ", ".join(matches.get(domain, [])[:6]) if domain != "generic" else "none"
+    reason = (
+        f"Inferred from schema keywords ({matched})."
+        if domain != "generic"
+        else "No strong domain-specific keyword pattern detected."
+    )
+
+    return {
+        "domain": domain,
+        "label": DOMAIN_LABELS.get(domain, DOMAIN_LABELS["generic"]),
+        "confidence": confidence,
+        "reason": reason,
+        "limitations": DOMAIN_DEFAULT_LIMITATIONS.get(domain, DOMAIN_DEFAULT_LIMITATIONS["generic"]),
+    }
+
+
+def enrich_dataset_context_with_ai(
+    df: pd.DataFrame,
+    file_names: list[str],
+    base_context: dict[str, str],
+) -> dict[str, str]:
+    if not (HAS_GEMINI and get_gemini_key()):
+        return base_context
+
+    try:
+        model = init_gemini(get_gemini_key())
+        schema_preview = []
+        for col in df.columns[:40]:
+            schema_preview.append(f"- {col} ({df[col].dtype}, {df[col].nunique(dropna=True)} unique)")
+
+        prompt = (
+            "Classify this dataset domain. Output ONLY JSON.\n"
+            'Schema: {"domain":"banking|sales|marketing|operations|mobility_ev|generic","reason":"short reason"}\n'
+            f"File names: {', '.join(file_names)}\n"
+            "Columns:\n" + "\n".join(schema_preview)
+        )
+        resp = model.generate_content(prompt, generation_config={"max_output_tokens": 180, "temperature": 0.0})
+        parsed = _extract_json_object(resp.text if hasattr(resp, "text") else str(resp))
+        if not parsed:
+            return base_context
+
+        domain = str(parsed.get("domain", "")).strip().lower()
+        if domain not in DOMAIN_LABELS:
+            return base_context
+
+        reason = str(parsed.get("reason", "")).strip()
+        out = base_context.copy()
+        out["domain"] = domain
+        out["label"] = DOMAIN_LABELS.get(domain, DOMAIN_LABELS["generic"])
+        out["confidence"] = "High" if domain != "generic" else base_context.get("confidence", "Low")
+        if reason:
+            out["reason"] = f"AI classification: {reason}"
+        out["limitations"] = DOMAIN_DEFAULT_LIMITATIONS.get(domain, DOMAIN_DEFAULT_LIMITATIONS["generic"])
+        return out
+    except Exception:
+        return base_context
+
+
+def build_use_case_templates(domain: str) -> dict[str, dict]:
+    generic_templates = {
+        "Custom": {
+            "question": "What are the most important drivers, risks, and opportunities in this dataset?",
+            "questions_answered": [
+                "Which metrics are most volatile or concentrated?",
+                "What segments are outperforming or underperforming?",
+                "Which anomalies or data quality issues need immediate attention?",
+            ],
+            "recommended_filters": "Date, segment/category, top metrics",
+            "objectives": [
+                "Prioritize high-impact decisions",
+                "Reduce avoidable risk",
+                "Improve data quality for reliable reporting",
+            ],
+        },
+        "Quality & Reliability": {
+            "question": "Where are data quality issues that could distort decisions?",
+            "questions_answered": [
+                "Which columns have missingness and outlier concentration?",
+                "Which fields need standardization?",
+                "What should be fixed before executive reporting?",
+            ],
+            "recommended_filters": "Missing %, outlier-heavy metrics, source file",
+            "objectives": [
+                "Improve trust in KPIs",
+                "Lower reporting errors",
+                "Build repeatable data hygiene checks",
+            ],
+        },
+        "Performance Drivers": {
+            "question": "Which segments explain most performance lift or decline?",
+            "questions_answered": [
+                "Which categories contribute most to outcomes?",
+                "Where is downside concentrated?",
+                "Which levers are likely to produce quick wins?",
+            ],
+            "recommended_filters": "Top category fields, date windows, key numeric metrics",
+            "objectives": [
+                "Focus execution on top-impact segments",
+                "Mitigate largest risk pockets",
+                "Translate analysis into actions",
+            ],
+        },
+    }
+
+    banking_templates = {
+        "Custom": {
+            "question": "What are the most actionable cash-flow, risk, and control insights in these transactions?",
+            "questions_answered": [
+                "Where are the biggest outflows and strongest inflows?",
+                "Which transaction segments require immediate review?",
+                "What should be done in the next 7 days to improve control?",
+            ],
+            "recommended_filters": "transaction_date, description/category, debit/credit",
+            "objectives": [
+                "Improve cash-flow visibility",
+                "Reduce avoidable debit outflow",
+                "Strengthen transaction governance",
+            ],
+        },
+        "Cash Flow Monitoring": {
+            "question": "How are debits, credits, and net cash flow trending, and where are the biggest leakages?",
+            "questions_answered": [
+                "Which categories/merchants drive the highest debits?",
+                "Is net flow improving or declining over time?",
+                "Which transactions look abnormal or need review?",
+            ],
+            "recommended_filters": "transaction_date, description/category, debit/credit thresholds",
+            "objectives": [
+                "Reduce avoidable outflows",
+                "Protect positive cash flow",
+                "Flag high-risk transactions faster",
+            ],
+        },
+        "Spending Control": {
+            "question": "Where can spending be reduced without harming core operations?",
+            "questions_answered": [
+                "What are the top recurring debit categories?",
+                "Which vendors or transaction types are growing fastest?",
+                "Which costs should be capped or reviewed weekly?",
+            ],
+            "recommended_filters": "description, merchant/payee, debit percentile bands",
+            "objectives": [
+                "Cut non-essential spend",
+                "Improve budget discipline",
+                "Set audit thresholds for high-value transactions",
+            ],
+        },
+        "Data Integrity Audit": {
+            "question": "What transaction data issues could mislead financial decisions?",
+            "questions_answered": [
+                "Where are missing or inconsistent transaction fields?",
+                "Do outliers represent valid events or data errors?",
+                "What fields should be standardized for reporting?",
+            ],
+            "recommended_filters": "missing fields, outlier windows, source_file",
+            "objectives": [
+                "Improve reporting accuracy",
+                "Reduce reconciliation effort",
+                "Create cleaner inputs for finance automation",
+            ],
+        },
+    }
+
+    if domain == "banking":
+        return banking_templates
+    if domain == "mobility_ev":
+        return {
+            "Route Efficiency": {
+                "question": "Which routes deliver the best and worst efficiency over time?",
+                "questions_answered": [
+                    "Which route segments consume the most energy?",
+                    "How does efficiency change by period and conditions?",
+                    "Where can planning reduce battery drain?",
+                ],
+                "recommended_filters": "date range, route/location, duration, energy metrics",
+                "objectives": [
+                    "Improve route-level efficiency",
+                    "Reduce avoidable energy waste",
+                    "Prioritize high-impact driving adjustments",
+                ],
+            },
+            **generic_templates,
+        }
+    return generic_templates
+
+
+def chat_example_prompt(domain: str) -> str:
+    mapping = {
+        "banking": "Which transaction categories drive the highest debit outflow this month?",
+        "sales": "Which products and channels contributed most to revenue growth?",
+        "marketing": "Which campaigns have the highest conversion efficiency at lowest cost?",
+        "operations": "Which queues have the highest breach risk and what should we fix first?",
+        "mobility_ev": "Which routes have the worst energy efficiency and when do they occur?",
+    }
+    return mapping.get(domain, "What are the top risks and opportunities in this dataset right now?")
+
+
 def guess_export_date(text: str) -> str:
     month_match = re.search(
         r"(January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2}\s+\d{4}",
@@ -756,7 +1064,32 @@ def guess_export_date(text: str) -> str:
     return datetime.now().date().isoformat()
 
 
-def calculate_business_kpis(df: pd.DataFrame) -> list[tuple[str, str, str]]:
+def _format_kpi_value(value: float) -> str:
+    if pd.isna(value):
+        return "N/A"
+    if abs(value) < 1e-9:
+        return "0"
+    if abs(value) < 0.01:
+        return "<0.01"
+    if abs(value) >= 1000:
+        return f"{value:,.0f}"
+    if abs(value) >= 1:
+        return f"{value:,.2f}"
+    return f"{value:,.3f}"
+
+
+def _finance_columns(df: pd.DataFrame) -> dict[str, str | None]:
+    cols = df.columns.tolist()
+    return {
+        "debit": find_column(cols, ["debit", "withdrawal", "outflow", "expense"]),
+        "credit": find_column(cols, ["credit", "deposit", "inflow", "income"]),
+        "balance": find_column(cols, ["balance", "ending balance", "available balance"]),
+        "amount": find_column(cols, ["amount", "transaction amount", "value"]),
+        "segment": find_column(cols, ["description", "merchant", "category", "payee", "transaction_type", "memo"]),
+    }
+
+
+def calculate_business_kpis(df: pd.DataFrame, dataset_context: dict | None = None) -> list[tuple[str, str, str]]:
     """
     Generate universal KPIs that work for ANY CSV dataset.
     No hardcoded column names — purely statistical.
@@ -765,6 +1098,8 @@ def calculate_business_kpis(df: pd.DataFrame) -> list[tuple[str, str, str]]:
     numeric_cols = df.select_dtypes(include=["number"]).columns.tolist()
     datetime_cols = df.select_dtypes(include=["datetime64[ns]", "datetimetz"]).columns.tolist()
     cat_cols = df.select_dtypes(include=["object", "category", "bool", "string"]).columns.tolist()
+
+    domain = (dataset_context or {}).get("domain", "generic")
 
     # 1. Total records (with source breakdown if multi-CSV)
     if "Source File" in df.columns:
@@ -786,38 +1121,101 @@ def calculate_business_kpis(df: pd.DataFrame) -> list[tuple[str, str, str]]:
                 f"{dt_series.min().date()} to {dt_series.max().date()}",
             ))
 
-    # 3. Top numeric column: pick the one with the most variance (most interesting)
+    # Domain-specific KPI path for banking/transactions
+    if domain == "banking":
+        cols = _finance_columns(df)
+        debit_col, credit_col, balance_col, amount_col, seg_col = (
+            cols["debit"], cols["credit"], cols["balance"], cols["amount"], cols["segment"]
+        )
+
+        debit = pd.to_numeric(df[debit_col], errors="coerce").fillna(0) if debit_col else pd.Series(0, index=df.index, dtype=float)
+        credit = pd.to_numeric(df[credit_col], errors="coerce").fillna(0) if credit_col else pd.Series(0, index=df.index, dtype=float)
+        amount = pd.to_numeric(df[amount_col], errors="coerce") if amount_col else pd.Series(dtype=float)
+
+        if debit_col or credit_col:
+            total_debit = float(debit[debit > 0].sum())
+            total_credit = float(credit[credit > 0].sum())
+            net_flow = total_credit - total_debit
+            kpis.append(("Net Cash Flow", _format_kpi_value(net_flow), "Total credits minus total debits"))
+
+            non_zero_debit = debit[debit > 0]
+            if not non_zero_debit.empty:
+                kpis.append((
+                    "Typical Debit",
+                    _format_kpi_value(float(non_zero_debit.median())),
+                    f"Median non-zero debit ({len(non_zero_debit):,} transactions)",
+                ))
+
+        elif amount_col and amount.notna().sum() > 0:
+            non_zero_amount = amount[amount.abs() > 0]
+            if not non_zero_amount.empty:
+                kpis.append((
+                    "Typical Amount",
+                    _format_kpi_value(float(non_zero_amount.median())),
+                    f"Median non-zero amount ({len(non_zero_amount):,} transactions)",
+                ))
+
+        if balance_col and balance_col in df.columns:
+            bal = pd.to_numeric(df[balance_col], errors="coerce").dropna()
+            if not bal.empty:
+                kpis.append(("Latest Balance", _format_kpi_value(float(bal.iloc[-1])), "Most recent non-null balance"))
+
+        if seg_col and seg_col in df.columns:
+            top_seg = df[seg_col].fillna("(Missing)").astype(str).value_counts().head(1)
+            if not top_seg.empty:
+                seg_pct = top_seg.iloc[0] / len(df) * 100
+                kpis.append((
+                    f"Top {seg_col[:14]}",
+                    str(top_seg.index[0])[:24],
+                    f"{int(top_seg.iloc[0]):,} records ({seg_pct:.1f}%)",
+                ))
+
+    # Generic KPI path: avoid sparse/zero-dominant columns
     if numeric_cols:
-        # Find the numeric column with most meaningful data (non-constant, high fill rate)
+        # Find the numeric column with meaningful non-zero signal.
         best_col, best_score = None, -1.0
         for col in numeric_cols:
             series = df[col].dropna()
             if len(series) < 5:
                 continue
+
+            numeric_series = pd.to_numeric(series, errors="coerce").dropna()
+            if numeric_series.empty:
+                continue
+
+            non_zero_ratio = float((numeric_series.abs() > 1e-9).mean())
+            if non_zero_ratio < 0.2:
+                continue
+
             fill_rate = len(series) / len(df)
-            cv = float(series.std() / abs(series.mean())) if series.mean() != 0 else 0.0
-            score = fill_rate * min(cv, 3.0)  # Balance fill rate with variability
+            cv = float(numeric_series.std() / abs(numeric_series.mean())) if numeric_series.mean() != 0 else 0.0
+            score = fill_rate * min(cv, 3.0) * non_zero_ratio
             if score > best_score:
                 best_score = score
                 best_col = col
         if best_col:
-            med = df[best_col].dropna().median()
-            # Smart formatting: no decimals for large numbers, 1-2 for small
-            if abs(med) >= 100:
-                fmt_val = f"{med:,.0f}"
-            elif abs(med) >= 1:
-                fmt_val = f"{med:,.1f}"
-            else:
-                fmt_val = f"{med:,.3f}"
-            kpis.append((
-                f"Median {best_col[:20]}",
-                fmt_val,
-                f"Median of most variable column ({df[best_col].dropna().count():,} values)",
-            ))
+            best_series = pd.to_numeric(df[best_col], errors="coerce").dropna()
+            non_zero = best_series[best_series.abs() > 1e-9]
+            central = float(non_zero.median()) if not non_zero.empty else float(best_series.median())
+            if abs(central) > 1e-9:
+                kpis.append((
+                    f"Typical {best_col[:18]}",
+                    _format_kpi_value(central),
+                    f"Median non-zero value ({len(non_zero):,} usable records)",
+                ))
 
     # 4. Top categorical: most frequent value in the highest-cardinality cat column
     if cat_cols:
-        best_cat = max(cat_cols, key=lambda c: df[c].nunique(dropna=True))
+        def cat_signal(col: str) -> float:
+            series = df[col].fillna("(Missing)").astype(str)
+            vc = series.value_counts(normalize=True)
+            if vc.empty:
+                return 0.0
+            top_share = float(vc.iloc[0])
+            cardinality_penalty = min(1.0, series.nunique(dropna=True) / max(len(series), 1))
+            return top_share * (1.0 - 0.4 * cardinality_penalty)
+
+        best_cat = max(cat_cols, key=cat_signal)
         top_val = df[best_cat].value_counts().head(1)
         if not top_val.empty:
             pct = top_val.iloc[0] / len(df) * 100
@@ -835,7 +1233,17 @@ def calculate_business_kpis(df: pd.DataFrame) -> list[tuple[str, str, str]]:
         f"Average fill rate across all {df.shape[1]} columns",
     ))
 
-    return kpis[:5]
+    # Keep only unique labels and avoid low-value 0-only KPI noise.
+    dedup: list[tuple[str, str, str]] = []
+    seen: set[str] = set()
+    for label, value, help_text in kpis:
+        if label in seen:
+            continue
+        seen.add(label)
+        if value in {"0.000", "0.00", "0.0"} and "Completeness" not in label:
+            continue
+        dedup.append((label, value, help_text))
+    return dedup[:5]
 
 
 def generate_ai_kpis(
@@ -849,7 +1257,13 @@ def generate_ai_kpis(
         st.session_state["_ai_last_kpi_raw"] = raw_response[:6000]
         if not specs:
             return []
-        return evaluate_kpi_specs(df, specs, max_items=5)
+        evaluated = evaluate_kpi_specs(df, specs, max_items=5)
+        cleaned = []
+        for label, value, help_text in evaluated:
+            if value in {"0", "0.0", "0.00", "0.000", "0.0000", "0.0%", "0.00%"}:
+                continue
+            cleaned.append((label, value, help_text))
+        return cleaned[:5]
     except Exception:
         return []
 
@@ -1210,6 +1624,10 @@ def generate_findings(
     end_col = find_column(cols, ["Ending Location", "end location"])
     duration_col = find_column(cols, ["Duration (Minutes)", "duration"])
     energy_col = find_column(cols, ["Average Energy Used (Wh/mi)", "wh/mi", "energy used"])
+    debit_col = find_column(cols, ["debit", "withdrawal", "outflow", "expense"])
+    credit_col = find_column(cols, ["credit", "deposit", "inflow", "income"])
+    balance_col = find_column(cols, ["balance", "ending balance", "available balance"])
+    txn_desc_col = find_column(cols, ["description", "merchant", "category", "payee", "transaction_type", "memo"])
 
     if start_col and not df_filtered.empty:
         counts = df_filtered[start_col].fillna("(Missing)").astype(str).value_counts()
@@ -1247,12 +1665,41 @@ def generate_findings(
             median_energy = float(energy.median())
             insights.append(f"Median energy use is **{median_energy:.1f} Wh/mi**.")
 
+    if debit_col and credit_col:
+        debit_vals = pd.to_numeric(df_filtered[debit_col], errors="coerce").fillna(0)
+        credit_vals = pd.to_numeric(df_filtered[credit_col], errors="coerce").fillna(0)
+        total_debit = float(debit_vals[debit_vals > 0].sum())
+        total_credit = float(credit_vals[credit_vals > 0].sum())
+        net = total_credit - total_debit
+        direction = "positive" if net >= 0 else "negative"
+        insights.append(
+            f"Net cash flow is **{_format_kpi_value(net)}** ({direction}) based on credits minus debits."
+        )
+        if (debit_vals > 0).any():
+            typical_debit = float(debit_vals[debit_vals > 0].median())
+            insights.append(f"Typical non-zero debit is **{_format_kpi_value(typical_debit)}**.")
+
+    if balance_col:
+        bal_vals = pd.to_numeric(df_filtered[balance_col], errors="coerce").dropna()
+        if not bal_vals.empty:
+            insights.append(
+                f"Latest balance observed: **{_format_kpi_value(float(bal_vals.iloc[-1]))}**."
+            )
+
+    if txn_desc_col and len(insights) < 7:
+        top_desc = df_filtered[txn_desc_col].fillna("(Missing)").astype(str).value_counts().head(1)
+        if not top_desc.empty:
+            desc_pct = top_desc.iloc[0] / max(len(df_filtered), 1) * 100
+            insights.append(
+                f"Top {txn_desc_col} is **{top_desc.index[0]}** at **{desc_pct:.1f}%** share."
+            )
+
     if datetime_cols:
         dt_col = datetime_cols[0]
         dt_series = df_filtered[dt_col].dropna()
         if not dt_series.empty:
             weekend_pct = float((dt_series.dt.dayofweek >= 5).mean() * 100)
-            insights.append(f"Weekend trips represent **{weekend_pct:.1f}%** of activity in the filtered view.")
+            insights.append(f"Weekend records represent **{weekend_pct:.1f}%** of activity in the filtered view.")
 
             if energy_col and pd.api.types.is_numeric_dtype(df_filtered[energy_col]):
                 trend_df = df_filtered[[dt_col, energy_col]].dropna().copy()
@@ -1287,7 +1734,7 @@ def generate_findings(
             insights.append(f"Column **{cat}** has **{uniq:,}** unique categories in the current view.")
 
     if len(insights) < 5:
-        insights.append("Use sidebar filters to isolate route clusters and compare efficiency by segment.")
+        insights.append("Use sidebar filters to isolate high-impact segments and compare performance by category.")
 
     return insights[:7]
 
@@ -1379,6 +1826,79 @@ def build_html_report(summary: dict) -> str:
 </body>
 </html>
 """.strip()
+
+
+def build_local_actionable_report(
+    df_full: pd.DataFrame,
+    df_filtered: pd.DataFrame,
+    dataset_context: dict,
+    kpis: list[tuple[str, str, str]],
+    insights: list[str],
+    numeric_cols: list[str],
+    categorical_cols: list[str],
+) -> str:
+    domain_label = dataset_context.get("label", DOMAIN_LABELS["generic"])
+    domain_reason = dataset_context.get("reason", "")
+
+    top_kpis = "\n".join(f"- **{label}**: {value} — {help_text}" for label, value, help_text in kpis[:5])
+    top_signals = "\n".join(f"- {item}" for item in insights[:5])
+
+    actions: list[str] = []
+    missing = (df_filtered.isna().mean() * 100).sort_values(ascending=False)
+    missing = missing[missing > 0]
+    if not missing.empty:
+        col = str(missing.index[0])
+        pct = float(missing.iloc[0])
+        actions.append(
+            f"| Data quality lead | Fix missing `{col}` values (currently {pct:.1f}%) | 48h | Missingness for `{col}` below 1% |"
+        )
+
+    if numeric_cols:
+        target = numeric_cols[0]
+        vals = pd.to_numeric(df_filtered[target], errors="coerce").dropna()
+        if len(vals) >= 8:
+            p90 = float(vals.quantile(0.90))
+            actions.append(
+                f"| Finance/ops analyst | Review rows where `{target}` > {_format_kpi_value(p90)} | 72h | Top-10 high-value rows classified and tagged |"
+            )
+
+    if categorical_cols:
+        cat = categorical_cols[0]
+        vc = df_filtered[cat].fillna("(Missing)").astype(str).value_counts()
+        if not vc.empty:
+            top = str(vc.index[0])
+            share = vc.iloc[0] / max(len(df_filtered), 1) * 100
+            actions.append(
+                f"| Business owner | Create segment playbook for `{cat}={top}` ({share:.1f}% share) | 7d | Segment KPI improves week-over-week |"
+            )
+
+    if len(actions) < 3:
+        actions.append(
+            "| Team lead | Apply at least one date/category filter and re-run compare tab | 24h | Non-zero deltas shown for at least one KPI |"
+        )
+    if len(actions) < 4:
+        actions.append(
+            "| Data steward | Validate semantic definitions for key numeric columns | 7d | Data dictionary approved for KPI fields |"
+        )
+
+    action_table = "\n".join(actions[:4])
+
+    return (
+        "## Executive Summary\n"
+        f"This dataset is classified as **{domain_label}**. {domain_reason}\n\n"
+        "## KPI Snapshot\n"
+        f"{top_kpis if top_kpis else '- KPI signal not available.'}\n\n"
+        "## Key Signals\n"
+        f"{top_signals if top_signals else '- No significant signals detected.'}\n\n"
+        "## Action Plan (Operational)\n"
+        "| Owner | Action | Due | Success Metric |\n"
+        "|---|---|---|---|\n"
+        f"{action_table}\n\n"
+        "## Guardrails\n"
+        "- Avoid decisions on zero-delta comparisons when no filters are active.\n"
+        "- Treat sparse fields as event-driven rather than continuous behavior.\n"
+        "- Re-run after data cleaning before executive circulation.\n"
+    )
 
 
 # =============================================================================
@@ -1580,15 +2100,22 @@ if st.session_state.get("dataset_token") != dataset_token:
     st.session_state["working_data"] = data_raw.copy()
     st.session_state["cleaning_history"] = []
     st.session_state["ai_kpis"] = None  # Reset AI KPIs for new dataset
+    st.session_state.pop("biz_template_choice", None)
     st.session_state["_schema_snapshot"] = current_schema
 
-    has_tesla = any("tesla" in fn.lower() for fn in file_names)
-    default_source = "Tesla app CSV export" if has_tesla else "Uploaded CSV file"
+    detected_context = infer_dataset_context(data_raw, file_names)
+    detected_context = enrich_dataset_context_with_ai(data_raw, file_names, detected_context)
+    st.session_state["dataset_context"] = detected_context
+
+    default_source = f"{detected_context['label']} dataset upload"
     st.session_state["src_system"] = default_source
     st.session_state["src_export_date"] = guess_export_date(file_names[0])
     st.session_state["src_owner"] = "Edwin Brown"
     st.session_state["src_url"] = "Local file upload"
-    st.session_state["src_limitations"] = "Route names and tags may be user-entered and inconsistent."
+    st.session_state["src_limitations"] = detected_context.get(
+        "limitations",
+        DOMAIN_DEFAULT_LIMITATIONS["generic"],
+    )
 
 if renamed_columns:
     st.toast(f"Renamed {len(renamed_columns)} duplicate column(s) to avoid ambiguity", icon="⚠️")
@@ -1772,53 +2299,20 @@ filtered_data, filter_summaries = apply_filters_sidebar(data, numeric_cols, cate
 # --- Business Context ---
 st.markdown("### 🎯 Business Question and Decision Context")
 
-use_case_templates = {
-    "Custom": {
-        "question": "How can driving behavior and route choices improve Tesla efficiency, battery use, and trip planning?",
-        "questions_answered": [
-            "Which routes and locations consume the most energy?",
-            "How do trip duration and driving patterns vary over time?",
-            "Where can charging and trip planning decisions be improved?",
-        ],
-        "recommended_filters": "Date range, Starting Location, Ending Location, Tag",
-    },
-    "Route Efficiency Analysis": {
-        "question": "Which routes deliver the best and worst energy efficiency, and when do they occur?",
-        "questions_answered": [
-            "Which start/end routes have highest Wh/mi?",
-            "Do long routes differ from short routes in efficiency?",
-            "How stable is route efficiency month to month?",
-        ],
-        "recommended_filters": "Starting Location, Ending Location, Duration (Minutes)",
-    },
-    "Battery Performance Tracking": {
-        "question": "How consistently is battery consumed per mile across trips and periods?",
-        "questions_answered": [
-            "What is battery drop per 100 miles over time?",
-            "Are there outlier trips with abnormal battery consumption?",
-            "Which conditions correspond to battery inefficiency?",
-        ],
-        "recommended_filters": "Started At, Ended At, Distance (mi), Starting Battery (%)",
-    },
-    "Peak Usage Times": {
-        "question": "When are peak driving windows, and what patterns are visible by weekday/weekend?",
-        "questions_answered": [
-            "Which days and periods have the most trips?",
-            "Is weekend behavior different from weekday behavior?",
-            "What are the busiest origin/destination combinations?",
-        ],
-        "recommended_filters": "Started At, Tag, Starting Location",
-    },
-    "Cost Optimization": {
-        "question": "Where can energy consumption be reduced to lower charging cost over time?",
-        "questions_answered": [
-            "Which trips have the highest kWh use?",
-            "Can route choices reduce Wh/mi?",
-            "How much can be saved if high-consumption segments are improved?",
-        ],
-        "recommended_filters": "Total Energy Used (kWh), Average Energy Used (Wh/mi), Distance (mi)",
-    },
-}
+dataset_context = st.session_state.get("dataset_context")
+if not isinstance(dataset_context, dict):
+    dataset_context = infer_dataset_context(data, file_names)
+    st.session_state["dataset_context"] = dataset_context
+
+use_case_templates = build_use_case_templates(dataset_context.get("domain", "generic"))
+domain_label = dataset_context.get("label", DOMAIN_LABELS["generic"])
+domain_conf = dataset_context.get("confidence", "Low")
+domain_reason = dataset_context.get("reason", "")
+
+st.info(
+    f"Detected dataset type: **{domain_label}** ({domain_conf} confidence). "
+    f"{domain_reason}"
+)
 
 col_ctx1, col_ctx2 = st.columns([1, 2])
 with col_ctx1:
@@ -1841,15 +2335,12 @@ with st.expander("Example questions answered & objectives", expanded=False):
             st.write(f"• {q}")
     with c2:
         st.markdown("**🎯 Business objectives**")
-        st.markdown(
-            "• Reduce average energy use (Wh/mi)\n"
-            "• Monitor battery drop per distance\n"
-            "• Identify frequent start/end route clusters"
-        )
+        for objective in selected_template.get("objectives", []):
+            st.write(f"• {objective}")
 
 # --- KPIs ---
 st.markdown("### 📈 Key Performance Indicators")
-kpis = calculate_business_kpis(filtered_data)
+kpis = calculate_business_kpis(filtered_data, dataset_context=dataset_context)
 if kpis:
     kpi_cols = st.columns(len(kpis))
     for idx, (label, value, help_text) in enumerate(kpis):
@@ -1880,7 +2371,14 @@ if HAS_GEMINI and get_gemini_key():
 
 # --- Executive decision cards ---
 st.markdown("### 🧭 Executive Decision Cards")
-decision_cards = generate_decision_cards(data, filtered_data, numeric_cols, categorical_cols)
+decision_cards = generate_decision_cards(
+    data,
+    filtered_data,
+    numeric_cols,
+    categorical_cols,
+    dataset_context=dataset_context,
+    filter_active=bool(filter_summaries),
+)
 dc_cols = st.columns(3)
 for idx, card in enumerate(decision_cards):
     with dc_cols[idx]:
@@ -2203,6 +2701,11 @@ with tab_compare:
         st.warning("No comparison available — filtered data is empty.")
     else:
         st.caption(sample_size_label(data, filtered_data, datetime_cols))
+        if not filter_summaries:
+            st.info(
+                "No active filters are applied, so filtered and full metrics will often be identical. "
+                "Apply at least one filter to get meaningful deltas."
+            )
 
         compare_df = comparison_metrics_table(data, filtered_data, numeric_cols)
         if compare_df.empty:
@@ -2215,7 +2718,12 @@ with tab_compare:
             cm1, cm2, cm3 = st.columns(3)
             cm1.metric("Full-data mean", f"{chosen_row['full_mean']:.3g}")
             cm2.metric("Filtered mean", f"{chosen_row['filtered_mean']:.3g}")
-            cm3.metric("Delta vs full", f"{chosen_row['delta']:.3g}", f"{chosen_row['delta_pct']:.1f}%")
+            delta_pct = float(chosen_row["delta_pct"])
+            delta_value = float(chosen_row["delta"])
+            if abs(delta_pct) < 0.1:
+                cm3.metric("Delta vs full", f"{delta_value:.3g}", "No material delta")
+            else:
+                cm3.metric("Delta vs full", f"{delta_value:.3g}", f"{delta_pct:.1f}%")
 
             st.dataframe(compare_df, use_container_width=True, height=260)
 
@@ -2346,7 +2854,9 @@ with tab_ai:
             with st.chat_message(msg["role"]):
                 st.markdown(msg["content"])
 
-        user_question = st.chat_input("Ask about your data... e.g. 'Which routes use the most energy?'")
+        user_question = st.chat_input(
+            f"Ask about your data... e.g. '{chat_example_prompt(dataset_context.get('domain', 'generic'))}'"
+        )
         if user_question:
             st.session_state["ai_chat_history"].append({"role": "user", "content": user_question})
             with st.chat_message("user"):
@@ -2486,29 +2996,51 @@ with tab_ai:
                 try:
                     model = init_gemini(gemini_key)
 
-                    # Include existing findings
                     findings_list = generate_findings(
                         data, filtered_data, numeric_cols, categorical_cols, datetime_cols
                     )
-                    findings_text = "\n".join(f"- {f}" for f in findings_list)
-
-                    report_prompt = (
-                        "You are a senior data analyst. Write a professional narrative report about the following dataset. "
-                        "Structure it with these sections:\n"
-                        "1. **Executive Summary** (2-3 sentences)\n"
-                        "2. **Data Overview** (schema, quality, completeness)\n"
-                        "3. **Key Findings** (the most important patterns)\n"
-                        "4. **Anomalies & Concerns** (data quality issues or unusual patterns)\n"
-                        "5. **Recommendations** (actionable next steps)\n\n"
-                        "Be specific with numbers. Use markdown formatting.\n\n"
-                        f"DATA CONTEXT:\n{ai_context}\n\n"
-                        f"AUTOMATED FINDINGS:\n{findings_text}"
+                    local_report = build_local_actionable_report(
+                        data,
+                        filtered_data,
+                        dataset_context,
+                        kpis,
+                        findings_list,
+                        numeric_cols,
+                        categorical_cols,
                     )
-                    response = model.generate_content(report_prompt)
-                    report_text = response.text
+
+                    rewrite_prompt = (
+                        "You are an executive analytics editor. Rewrite the report below to be concise, actionable, and clean.\n"
+                        "Hard rules:\n"
+                        "- Keep section headings exactly.\n"
+                        "- Keep numeric facts consistent with the source report.\n"
+                        "- Do not invent metrics.\n"
+                        "- Do not over-emphasize 0.00 values; if sparse, describe as rare/sparse.\n"
+                        "- Keep under 420 words.\n\n"
+                        f"SOURCE REPORT:\n{local_report}"
+                    )
+                    response = model.generate_content(
+                        rewrite_prompt,
+                        generation_config={"max_output_tokens": 900, "temperature": 0.2},
+                    )
+                    report_text = response.text.strip()
+                    if "## Action Plan (Operational)" not in report_text or len(report_text) > 9000:
+                        report_text = local_report
                     st.session_state["ai_report"] = report_text
                 except Exception as e:
-                    st.error(f"Report generation failed: {e}")
+                    findings_list = generate_findings(
+                        data, filtered_data, numeric_cols, categorical_cols, datetime_cols
+                    )
+                    st.session_state["ai_report"] = build_local_actionable_report(
+                        data,
+                        filtered_data,
+                        dataset_context,
+                        kpis,
+                        findings_list,
+                        numeric_cols,
+                        categorical_cols,
+                    )
+                    st.warning(f"AI rewrite unavailable, using grounded local report: {e}")
 
         if st.session_state.get("ai_report"):
             st.markdown(st.session_state["ai_report"])
