@@ -38,6 +38,32 @@ except ImportError:
 
 MAX_UPLOAD_MB = 200
 SUPPORTED_UPLOAD_TYPES = ["csv", "xlsx", "xls", "pdf", "docx", "png", "jpg", "jpeg"]
+GEMINI_MODEL_PROFILES: dict[str, list[str]] = {
+    "Gemini 3 Pro (best quality)": [
+        "gemini-3-pro",
+        "gemini-3-pro-latest",
+        "gemini-2.5-pro",
+        "gemini-2.5-pro-latest",
+        "gemini-2.5-flash",
+        "gemini-2.0-flash",
+        "gemini-2.5-flash-lite",
+    ],
+    "Auto (balanced)": [
+        "gemini-3-pro",
+        "gemini-2.5-pro",
+        "gemini-2.5-flash",
+        "gemini-2.0-flash",
+        "gemini-2.5-flash-lite",
+        "gemini-2.0-flash-lite",
+    ],
+    "Flash (speed first)": [
+        "gemini-3-flash",
+        "gemini-2.5-flash",
+        "gemini-2.0-flash",
+        "gemini-2.5-flash-lite",
+        "gemini-2.0-flash-lite",
+    ],
+}
 
 st.set_page_config(
     page_title="Business Analytics Dashboard",
@@ -371,36 +397,127 @@ def get_gemini_key() -> str | None:
     return st.session_state.get("user_gemini_key", "")
 
 
-def init_gemini(api_key: str):
-    """Configure Gemini and return a working model (tries multiple models)."""
-    genai.configure(api_key=api_key)
+def _dedupe_preserve_order(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for value in values:
+        value_clean = str(value).strip()
+        if not value_clean or value_clean in seen:
+            continue
+        seen.add(value_clean)
+        out.append(value_clean)
+    return out
 
-    # Try models in order: newest stable free-tier first, then fallbacks
-    model_candidates = [
-        "gemini-2.5-flash-lite",
-        "gemini-2.0-flash-lite",
-        "gemini-2.5-flash",
-        "gemini-2.0-flash",
-        "gemini-3-flash-preview",
+
+def get_gemini_model_candidates() -> list[str]:
+    profile = st.session_state.get("gemini_model_profile", "Gemini 3 Pro (best quality)")
+    base = GEMINI_MODEL_PROFILES.get(profile, GEMINI_MODEL_PROFILES["Auto (balanced)"])
+    custom = str(st.session_state.get("gemini_custom_model", "")).strip()
+    blocked = set(st.session_state.get("_gemini_blocked_models", []))
+
+    candidates: list[str] = []
+    if custom:
+        candidates.append(custom)
+    candidates.extend(base)
+    deduped = _dedupe_preserve_order(candidates)
+
+    available = [name for name in deduped if name not in blocked]
+    return available or _dedupe_preserve_order(base)
+
+
+def _gemini_error_is_retriable(exc: Exception) -> bool:
+    message = str(exc).lower()
+    signals = [
+        "429",
+        "quota",
+        "rate limit",
+        "resource exhausted",
+        "not found",
+        "permission",
     ]
+    return any(signal in message for signal in signals)
 
-    # If we already found a working model in this session, reuse it
-    cached = st.session_state.get("_gemini_model_name")
-    if cached:
-        return genai.GenerativeModel(cached)
 
-    # Probe each model with a tiny request
-    for name in model_candidates:
+def mark_current_model_blocked() -> None:
+    current = str(st.session_state.get("_gemini_model_name", "")).strip()
+    if not current:
+        return
+    blocked = st.session_state.get("_gemini_blocked_models", [])
+    if current not in blocked:
+        blocked.append(current)
+    st.session_state["_gemini_blocked_models"] = blocked[-10:]
+    st.session_state.pop("_gemini_model_name", None)
+    st.session_state.pop("_gemini_last_probe_signature", None)
+
+
+def init_gemini(api_key: str, force_probe: bool = False):
+    """Configure Gemini and return a working model based on sidebar preference."""
+    genai.configure(api_key=api_key)
+    model_candidates = get_gemini_model_candidates()
+    candidate_signature = "|".join(model_candidates)
+    probe_ttl_seconds = 600.0
+    now_ts = datetime.now().timestamp()
+
+    cached_name = str(st.session_state.get("_gemini_model_name", "")).strip()
+    cached_signature = str(st.session_state.get("_gemini_last_probe_signature", "")).strip()
+    cached_probe_at = float(st.session_state.get("_gemini_last_probe_at", 0.0) or 0.0)
+
+    if (
+        cached_name
+        and not force_probe
+        and cached_name in model_candidates
+        and cached_signature == candidate_signature
+        and (now_ts - cached_probe_at) < probe_ttl_seconds
+    ):
+        return genai.GenerativeModel(cached_name)
+
+    # Keep cached first when still valid, then probe others.
+    probe_order = model_candidates[:]
+    if cached_name and cached_name in probe_order:
+        probe_order = [cached_name] + [m for m in probe_order if m != cached_name]
+
+    first_error = ""
+    for name in probe_order:
         try:
             model = genai.GenerativeModel(name)
-            model.generate_content("Hi", generation_config={"max_output_tokens": 5})
+            model.generate_content("ping", generation_config={"max_output_tokens": 5})
             st.session_state["_gemini_model_name"] = name
+            st.session_state["_gemini_last_probe_signature"] = candidate_signature
+            st.session_state["_gemini_last_probe_at"] = now_ts
+            st.session_state["_gemini_last_probe_error"] = ""
+            blocked = st.session_state.get("_gemini_blocked_models", [])
+            if name in blocked:
+                st.session_state["_gemini_blocked_models"] = [m for m in blocked if m != name]
             return model
-        except Exception:
+        except Exception as exc:
+            if not first_error:
+                first_error = str(exc)
             continue
 
-    # Last resort: just return the first candidate and let the caller handle errors
-    return genai.GenerativeModel(model_candidates[0])
+    st.session_state["_gemini_last_probe_signature"] = candidate_signature
+    st.session_state["_gemini_last_probe_at"] = now_ts
+    st.session_state["_gemini_last_probe_error"] = first_error
+    fallback_name = model_candidates[0]
+    st.session_state["_gemini_model_name"] = fallback_name
+    return genai.GenerativeModel(fallback_name)
+
+
+def run_gemini_with_failover(api_key: str, callback):
+    """Run a Gemini call and rotate to next model on quota/rate errors."""
+    last_exc: Exception | None = None
+    for attempt in range(2):
+        model = init_gemini(api_key, force_probe=attempt > 0)
+        try:
+            return callback(model)
+        except Exception as exc:
+            last_exc = exc
+            if not _gemini_error_is_retriable(exc):
+                raise
+            mark_current_model_blocked()
+            continue
+    if last_exc:
+        raise last_exc
+    raise RuntimeError("Gemini request failed.")
 
 
 def build_gemini_context(
@@ -780,7 +897,6 @@ def read_image_with_gemini(file_bytes: bytes, mime_type: str) -> tuple[pd.DataFr
     if not api_key:
         raise ValueError("Image parsing requires a Gemini API key in Streamlit secrets or sidebar.")
 
-    model = init_gemini(api_key)
     prompt = (
         "Extract structured data from this image. Return ONLY JSON in one object using:\n"
         '{"headers":["..."],"rows":[["..."]],"text_lines":["..."]}\n'
@@ -789,9 +905,12 @@ def read_image_with_gemini(file_bytes: bytes, mime_type: str) -> tuple[pd.DataFr
         "- If no clear table, provide text_lines.\n"
         "- No markdown or explanations."
     )
-    response = model.generate_content(
-        [prompt, {"mime_type": mime_type, "data": file_bytes}],
-        generation_config={"max_output_tokens": 1500, "temperature": 0.0},
+    response = run_gemini_with_failover(
+        api_key,
+        lambda model: model.generate_content(
+            [prompt, {"mime_type": mime_type, "data": file_bytes}],
+            generation_config={"max_output_tokens": 1500, "temperature": 0.0},
+        ),
     )
     parsed = _extract_json_object(response.text if hasattr(response, "text") else str(response))
     if not parsed:
@@ -1144,7 +1263,9 @@ def enrich_dataset_context_with_ai(
         return base_context
 
     try:
-        model = init_gemini(get_gemini_key())
+        api_key = get_gemini_key()
+        if not api_key:
+            return base_context
         schema_preview = []
         for col in df.columns[:40]:
             schema_preview.append(f"- {col} ({df[col].dtype}, {df[col].nunique(dropna=True)} unique)")
@@ -1155,7 +1276,13 @@ def enrich_dataset_context_with_ai(
             f"File names: {', '.join(file_names)}\n"
             "Columns:\n" + "\n".join(schema_preview)
         )
-        resp = model.generate_content(prompt, generation_config={"max_output_tokens": 180, "temperature": 0.0})
+        resp = run_gemini_with_failover(
+            api_key,
+            lambda model: model.generate_content(
+                prompt,
+                generation_config={"max_output_tokens": 180, "temperature": 0.0},
+            ),
+        )
         parsed = _extract_json_object(resp.text if hasattr(resp, "text") else str(resp))
         if not parsed:
             return base_context
@@ -1534,7 +1661,9 @@ def generate_ai_kpis(
                 continue
             cleaned.append((label, value, help_text))
         return cleaned[:5]
-    except Exception:
+    except Exception as exc:
+        if _gemini_error_is_retriable(exc):
+            raise
         return []
 
 
@@ -2421,6 +2550,10 @@ if session_file is not None:
 
 st.sidebar.markdown("## 🤖 AI Configuration")
 if HAS_GEMINI:
+    st.session_state.setdefault("gemini_model_profile", "Gemini 3 Pro (best quality)")
+    st.session_state.setdefault("gemini_custom_model", "")
+    st.session_state.setdefault("_gemini_blocked_models", [])
+
     _existing_key = get_gemini_key()
     if _existing_key:
         st.sidebar.success("Gemini API key detected", icon="✅")
@@ -2433,6 +2566,41 @@ if HAS_GEMINI:
         )
         if _user_key:
             st.session_state["user_gemini_key"] = _user_key
+            st.rerun()
+
+    if get_gemini_key():
+        st.sidebar.selectbox(
+            "Model strategy",
+            options=list(GEMINI_MODEL_PROFILES.keys()),
+            key="gemini_model_profile",
+            help=(
+                "Prefer Gemini 3 Pro for best quality, Auto for balanced fallback, "
+                "or Flash for lower latency."
+            ),
+        )
+        st.sidebar.text_input(
+            "Custom model id (optional)",
+            key="gemini_custom_model",
+            help="If set, this model is tried first (example: gemini-3-pro).",
+        )
+
+        pref_signature = (
+            f"{st.session_state.get('gemini_model_profile', '')}|"
+            f"{str(st.session_state.get('gemini_custom_model', '')).strip()}"
+        )
+        if st.session_state.get("_gemini_pref_signature") != pref_signature:
+            st.session_state["_gemini_pref_signature"] = pref_signature
+            st.session_state.pop("_gemini_model_name", None)
+            st.session_state.pop("_gemini_last_probe_signature", None)
+            st.session_state["_gemini_blocked_models"] = []
+
+        candidate_preview = ", ".join(get_gemini_model_candidates()[:4])
+        st.sidebar.caption(f"Try order: {candidate_preview}")
+
+        if st.sidebar.button("Reset model routing", key="reset_gemini_routing", use_container_width=True):
+            st.session_state["_gemini_blocked_models"] = []
+            st.session_state.pop("_gemini_model_name", None)
+            st.session_state.pop("_gemini_last_probe_signature", None)
             st.rerun()
 else:
     st.sidebar.caption("Install `google-generativeai` to enable AI chat & reports.")
@@ -2623,9 +2791,12 @@ else:
 if HAS_GEMINI and get_gemini_key():
     if st.session_state.get("ai_kpis") is None:
         try:
-            _ai_model = init_gemini(get_gemini_key())
-            ai_kpis = generate_ai_kpis(
-                _ai_model, filtered_data, numeric_cols, categorical_cols, datetime_cols,
+            _api_key = get_gemini_key()
+            ai_kpis = run_gemini_with_failover(
+                _api_key,
+                lambda model: generate_ai_kpis(
+                    model, filtered_data, numeric_cols, categorical_cols, datetime_cols,
+                ),
             )
             if ai_kpis:
                 st.session_state["ai_kpis"] = ai_kpis
@@ -3137,8 +3308,6 @@ with tab_ai:
                 with st.spinner("Thinking..."):
                     answer = ""
                     try:
-                        model = init_gemini(gemini_key)
-                        st.session_state["_ai_last_model_name"] = st.session_state.get("_gemini_model_name", "unknown")
                         st.session_state["_ai_last_run_at"] = datetime.now().isoformat(timespec="seconds")
                         profile = build_dataset_profile(filtered_data)
                         st.session_state["_ai_last_rows_used"] = int(profile["rows"])
@@ -3146,15 +3315,19 @@ with tab_ai:
                         st.session_state["_ai_last_missingness"] = float(profile["missing_pct"])
 
                         try:
-                            query_plan, raw_plan = plan_query_with_gemini(
-                                model,
-                                question=user_question,
-                                context=ai_context,
-                                df=filtered_data,
-                                numeric_cols=numeric_cols,
-                                categorical_cols=categorical_cols,
-                                datetime_cols=datetime_cols,
+                            query_plan, raw_plan = run_gemini_with_failover(
+                                gemini_key,
+                                lambda model: plan_query_with_gemini(
+                                    model,
+                                    question=user_question,
+                                    context=ai_context,
+                                    df=filtered_data,
+                                    numeric_cols=numeric_cols,
+                                    categorical_cols=categorical_cols,
+                                    datetime_cols=datetime_cols,
+                                ),
                             )
+                            st.session_state["_ai_last_model_name"] = st.session_state.get("_gemini_model_name", "unknown")
                             st.session_state["_ai_last_prompt_mode"] = "structured_json"
                             st.session_state["_ai_last_plan_raw"] = raw_plan[:6000]
 
@@ -3201,10 +3374,14 @@ with tab_ai:
                                 "1) One headline\n2) Three bullet insights with numbers\n3) One action recommendation.\n\n"
                                 f"DATA CONTEXT:\n{ai_context}\n\nQUESTION:\n{user_question}"
                             )
-                            fallback_resp = model.generate_content(
-                                fallback_prompt,
-                                generation_config={"max_output_tokens": 500, "temperature": 0.2},
+                            fallback_resp = run_gemini_with_failover(
+                                gemini_key,
+                                lambda model: model.generate_content(
+                                    fallback_prompt,
+                                    generation_config={"max_output_tokens": 500, "temperature": 0.2},
+                                ),
                             )
+                            st.session_state["_ai_last_model_name"] = st.session_state.get("_gemini_model_name", "unknown")
                             answer = fallback_resp.text
                             st.warning("Structured plan validation failed; using text fallback.")
                             st.markdown(answer)
@@ -3214,14 +3391,20 @@ with tab_ai:
                                 "Provide a concise executive summary answer with one headline and three numeric bullets.\n\n"
                                 f"DATA CONTEXT:\n{ai_context}\n\nQUESTION:\n{user_question}"
                             )
-                            fallback_resp = model.generate_content(
-                                fallback_prompt,
-                                generation_config={"max_output_tokens": 400, "temperature": 0.2},
+                            fallback_resp = run_gemini_with_failover(
+                                gemini_key,
+                                lambda model: model.generate_content(
+                                    fallback_prompt,
+                                    generation_config={"max_output_tokens": 400, "temperature": 0.2},
+                                ),
                             )
+                            st.session_state["_ai_last_model_name"] = st.session_state.get("_gemini_model_name", "unknown")
                             answer = fallback_resp.text
                             st.warning(f"Planner/executor fallback triggered: {exec_err}")
                             st.markdown(answer)
                     except Exception as e:
+                        if _gemini_error_is_retriable(e):
+                            mark_current_model_blocked()
                         answer = f"Error communicating with Gemini: {e}"
                         st.error(answer)
 
@@ -3265,8 +3448,6 @@ with tab_ai:
         if st.button("Generate AI Report", key="ai_gen_report", type="primary"):
             with st.spinner("Generating narrative report..."):
                 try:
-                    model = init_gemini(gemini_key)
-
                     findings_list = generate_findings(
                         data, filtered_data, numeric_cols, categorical_cols, datetime_cols
                     )
@@ -3290,15 +3471,22 @@ with tab_ai:
                         "- Keep under 420 words.\n\n"
                         f"SOURCE REPORT:\n{local_report}"
                     )
-                    response = model.generate_content(
-                        rewrite_prompt,
-                        generation_config={"max_output_tokens": 900, "temperature": 0.2},
+                    response = run_gemini_with_failover(
+                        gemini_key,
+                        lambda model: model.generate_content(
+                            rewrite_prompt,
+                            generation_config={"max_output_tokens": 900, "temperature": 0.2},
+                        ),
                     )
+                    st.session_state["_ai_last_model_name"] = st.session_state.get("_gemini_model_name", "unknown")
+                    st.session_state["_ai_last_run_at"] = datetime.now().isoformat(timespec="seconds")
                     report_text = response.text.strip()
                     if "## Action Plan (Operational)" not in report_text or len(report_text) > 9000:
                         report_text = local_report
                     st.session_state["ai_report"] = report_text
                 except Exception as e:
+                    if _gemini_error_is_retriable(e):
+                        mark_current_model_blocked()
                     findings_list = generate_findings(
                         data, filtered_data, numeric_cols, categorical_cols, datetime_cols
                     )
