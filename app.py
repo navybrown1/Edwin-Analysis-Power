@@ -2306,6 +2306,21 @@ def build_local_actionable_report(
 # 3. MAIN APPLICATION LAYOUT
 # =============================================================================
 
+st.sidebar.markdown("## 🎯 Navigation")
+app_mode = st.sidebar.radio("Select App Mode", ["Business Analytics Dashboard", "Candidate Profiler"], label_visibility="collapsed")
+st.sidebar.markdown("---")
+
+if app_mode == "Candidate Profiler":
+    import streamlit.components.v1 as components
+    profiler_path = os.path.join(os.path.dirname(__file__), "Candidate_Dashboard_Enhanced.html")
+    if os.path.exists(profiler_path):
+        with open(profiler_path, "r", encoding="utf-8") as f:
+            html_data = f.read()
+        components.html(html_data, height=900, scrolling=True)
+    else:
+        st.info("Candidate Profiler dashboard not found. Please ensure Candidate_Dashboard_Enhanced.html is present in the application directory.")
+    st.stop()
+
 # --- Hero Header ---
 st.markdown("""
 <div class="dashboard-header">
@@ -2883,8 +2898,8 @@ st.markdown("<br>", unsafe_allow_html=True)
 # 6. TABS
 # =============================================================================
 
-tab_overview, tab_explore, tab_viz, tab_compare, tab_findings, tab_ai, tab_export, tab_help, tab_profiler = st.tabs(
-    ["📋 Overview", "🔎 Explore", "📊 Visualize", "⚖️ Compare", "💡 Findings", "🤖 AI Analysis", "📥 Export", "❓ Help", "🎯 Candidate Profiler"]
+tab_overview, tab_explore, tab_viz, tab_compare, tab_findings, tab_ai, tab_export, tab_help = st.tabs(
+    ["📋 Overview", "🔎 Explore", "📊 Visualize", "⚖️ Compare", "💡 Findings", "🤖 AI Analysis", "📥 Export", "❓ Help"]
 )
 
 # ---------- OVERVIEW ----------
@@ -3846,15 +3861,3 @@ with tab_help:
 
     with st.expander("View README", expanded=False):
         st.code(build_readme_text(), language="markdown")
-
-# ---------- CANDIDATE PROFILER ----------
-with tab_profiler:
-    import streamlit.components.v1 as components
-    st.subheader("Candidate Profiler & Benchmark")
-    profiler_path = os.path.join(os.path.dirname(__file__), "Candidate_Dashboard_Enhanced.html")
-    if os.path.exists(profiler_path):
-        with open(profiler_path, "r", encoding="utf-8") as f:
-            html_data = f.read()
-        components.html(html_data, height=900, scrolling=True)
-    else:
-        st.info("Candidate Profiler dashboard not found. Please ensure Candidate_Dashboard_Enhanced.html is present in the application directory.")
