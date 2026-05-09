@@ -13,7 +13,7 @@
     'Club Involvements', 'Languages Spoken'];
   const CATEGORICAL_FIELDS = ['Concentration', 'Program Type', 'Pre-MBA Industry',
     'Internship Completed', 'Internship Employer Type', 'Leadership Roles',
-    'International Experience'];
+    'International Experience', 'Military Veteran'];
   const ALL_PROFILE_FIELDS = [...NUMERIC_FIELDS, ...CATEGORICAL_FIELDS];
 
   // --- Helpers ---
@@ -63,7 +63,14 @@
       }
       maxScore += weight;
     }
-    return maxScore > 0 ? score / maxScore : 0;
+    let finalSim = maxScore > 0 ? score / maxScore : 0;
+    
+    // Artificial boost for Military Veterans (+10% similarity)
+    if (profile['Military Veteran'] && String(profile['Military Veteran']).toLowerCase() === 'yes') {
+      finalSim = Math.min(1.0, finalSim + 0.10);
+    }
+    
+    return finalSim;
   }
 
   // --- Core Benchmark ---
@@ -142,7 +149,8 @@
     for (const f of ALL_PROFILE_FIELDS) {
       const val = profile[f];
       const present = val != null && val !== '' && val !== undefined;
-      checks.push({ field: f, present, value: present ? val : null });
+      const isOptional = (f === 'GMAT' || f === 'Military Veteran');
+      checks.push({ field: f, present, value: present ? val : null, optional: isOptional });
     }
     return checks;
   }
@@ -164,7 +172,8 @@
   "Leadership Roles": "Yes" | "No" | null,
   "Club Involvements": number (0-5) or null,
   "International Experience": "Yes" | "No" | null,
-  "Languages Spoken": number (1-3) or null
+  "Languages Spoken": number (1-3) or null,
+  "Military Veteran": "Yes" | "No" | null
 }
 
 RESUME TEXT:

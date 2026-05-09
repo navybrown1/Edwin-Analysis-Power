@@ -18,6 +18,7 @@
       'Internship Employer Type': ['Big Tech', 'Big Bank', 'Consulting', 'Other'],
       'Leadership Roles': ['Yes', 'No'],
       'International Experience': ['Yes', 'No'],
+      'Military Veteran': ['Yes', 'No'],
     };
     const numericRanges = {
       'GPA': { min: 2.0, max: 4.0, step: 0.01, placeholder: '3.45' },
@@ -80,24 +81,33 @@
   function renderDataQuality(profile) {
     const checks = BE.checkDataQuality(profile);
     const container = document.getElementById('data-quality-area');
-    const filled = checks.filter(c => c.present).length;
-    const total = checks.length;
-    const pct = Math.round((filled / total) * 100);
+    
+    const requiredChecks = checks.filter(c => !c.optional);
+    const filledRequired = requiredChecks.filter(c => c.present).length;
+    const totalRequired = requiredChecks.length;
+    const pct = Math.round((filledRequired / totalRequired) * 100);
 
     let html = `<div class="dq-header">
-      <span class="dq-score">${filled}/${total} fields</span>
+      <span class="dq-score">${filledRequired}/${totalRequired} required fields</span>
       <span class="dq-pct">${pct}% complete</span>
     </div>
     <div class="dq-bar-wrap"><div class="dq-bar" style="width:${pct}%"></div></div>
     <div class="dq-list">`;
+    
     for (const c of checks) {
-      const icon = c.present ? '✅' : '❌';
-      const val = c.present ? `<span class="dq-val">${c.value}</span>` : '<span class="dq-miss">missing</span>';
-      html += `<div class="dq-item ${c.present ? 'filled' : 'missing'}">${icon} <span class="dq-field">${c.field}</span> ${val}</div>`;
+      if (c.present) {
+        html += `<div class="dq-item filled">✅ <span class="dq-field">${c.field}</span> <span class="dq-val">${c.value}</span></div>`;
+      } else {
+        if (c.optional) {
+          html += `<div class="dq-item missing" style="color:var(--muted)">ℹ️ <span class="dq-field">${c.field}</span> <span class="dq-miss" style="color:#888;font-style:italic;">omitted (optional)</span></div>`;
+        } else {
+          html += `<div class="dq-item missing">❌ <span class="dq-field">${c.field}</span> <span class="dq-miss">missing</span></div>`;
+        }
+      }
     }
     html += '</div>';
     container.innerHTML = html;
-    return { filled, total, pct };
+    return { filled: filledRequired, total: totalRequired, pct };
   }
 
   // --- Results Rendering ---
