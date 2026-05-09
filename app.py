@@ -2312,82 +2312,11 @@ st.sidebar.markdown("---")
 
 if app_mode == "Candidate Profiler":
     import streamlit.components.v1 as components
-    import json
     
-    st.markdown("### 📄 Auto-Fill Profile from Resume")
-    gemini_key = get_gemini_key() if HAS_GEMINI else ""
-    
-    col1, col2 = st.columns([3, 1])
-    with col1:
-        resume_file = st.file_uploader("Upload Resume (PDF, DOCX, TXT)", type=["pdf", "txt", "docx"])
-    with col2:
-        st.write("") # spacer
-        st.write("")
-        scan_btn = st.button("Scan Resume", use_container_width=True)
-        
-    if scan_btn and resume_file:
-        if not gemini_key:
-            st.error("Please provide a Gemini API Key in the sidebar.")
-        else:
-            with st.spinner("Extracting candidate data with Gemini..."):
-                try:
-                    text = ""
-                    if resume_file.name.endswith('.pdf'):
-                        import pdfplumber
-                        with pdfplumber.open(resume_file) as pdf:
-                            for page in pdf.pages:
-                                page_text = page.extract_text()
-                                if page_text:
-                                    text += page_text + "\n"
-                    elif resume_file.name.endswith('.docx'):
-                        import docx
-                        doc = docx.Document(resume_file)
-                        text = "\n".join([para.text for para in doc.paragraphs])
-                    else:
-                        text = resume_file.read().decode('utf-8', errors='ignore')
-                        
-                    prompt = f"""You are an expert resume parser. Extract the following data points from this resume text. Return ONLY valid JSON with these exact keys (use null if not found):
-{{
-  "GPA": number or null,
-  "GMAT": number or null,
-  "Work Experience (Years)": number or null,
-  "Pre-MBA Salary": number or null,
-  "Concentration": "Finance" | "Accounting" | "Business Analytics" | "Information Systems" | null,
-  "Program Type": "Full-Time" | "Part-Time" | null,
-  "Pre-MBA Industry": "Tech" | "Finance" | "Consulting" | "Other" | null,
-  "Internship Completed": "Yes" | "No" | null,
-  "Internship Employer Type": "Big Tech" | "Big Bank" | "Consulting" | "Other" | null,
-  "Leadership Roles": "Yes" | "No" | null,
-  "Club Involvements": number (0-5) or null,
-  "International Experience": "Yes" | "No" | null,
-  "Languages Spoken": number (1-3) or null,
-  "Military Veteran": "Yes" | "No" | null
-}}
-
-RESUME TEXT:
-{text}"""
-                    response = run_gemini_with_failover(
-                        gemini_key,
-                        lambda model: model.generate_content(prompt)
-                    )
-                    import re
-                    json_match = re.search(r'\{.*\}', response.text, re.DOTALL)
-                    if json_match:
-                        st.session_state.candidate_profile = json.loads(json_match.group(0))
-                        st.success("Resume parsed successfully!")
-                    else:
-                        st.error("Could not parse JSON from Gemini response.")
-                except Exception as e:
-                    st.error(f"Error parsing resume: {str(e)}")
-
     profiler_path = os.path.join(os.path.dirname(__file__), "Candidate_Dashboard_Enhanced.html")
     if os.path.exists(profiler_path):
         with open(profiler_path, "r", encoding="utf-8") as f:
             html_data = f.read()
-            
-        if "candidate_profile" in st.session_state:
-            inject_script = f"<script>window.__PREFILLED_PROFILE = {json.dumps(st.session_state.candidate_profile)};</script>"
-            html_data = html_data.replace("<head>", f"<head>\n{inject_script}")
             
         components.html(html_data, height=1200, scrolling=True)
     else:
