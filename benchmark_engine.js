@@ -27,6 +27,11 @@
     const m = v.reduce((s, x) => s + x, 0) / v.length;
     return Math.sqrt(v.reduce((s, x) => s + (x - m) ** 2, 0) / v.length) || 1;
   }
+  function featureRange(f, arr) {
+    const v = arr.filter(x => x != null && isFinite(Number(x))).map(Number);
+    if (!v.length) return 1;
+    return Math.max(...v) - Math.min(...v) || 1;
+  }
   function percentile(val, arr) {
     const v = arr.filter(x => x != null && isFinite(Number(x))).map(Number).sort((a, b) => a - b);
     if (!v.length) return 50;
@@ -43,13 +48,13 @@
   function computeSimilarity(profile, row) {
     let score = 0;
     let maxScore = 0;
-    // Numeric: use gaussian-like proximity (closer = higher score)
+    // Numeric: use Gower's Distance
     for (const f of NUMERIC_FIELDS) {
       if (profile[f] == null || row[f] == null) continue;
       const allVals = DATA.map(r => r[f]).filter(x => x != null);
-      const s = std(allVals);
-      const dist = Math.abs(Number(profile[f]) - Number(row[f])) / s;
-      const sim = Math.exp(-0.5 * dist * dist); // Gaussian similarity
+      const range = featureRange(f, allVals);
+      const dist = Math.abs(Number(profile[f]) - Number(row[f])) / range;
+      const sim = Math.max(0, 1 - dist); // Gower similarity
       const weight = (f === 'GPA' || f === 'GMAT') ? 2 : 1;
       score += sim * weight;
       maxScore += weight;
@@ -78,7 +83,7 @@
     const offerCol = OFFER_COLS[targetIndustry];
     if (!offerCol) return null;
 
-    const schools = ['Columbia', 'NYU', 'Baruch College', 'Fordham'];
+    const schools = [...new Set(DATA.map(r => r['School']).filter(Boolean))].sort();
     const results = {};
 
     for (const school of schools) {
@@ -105,6 +110,7 @@
 
       // Avg post-MBA salary of neighbors
       const avgSalary = mean(neighbors.map(n => n.row['Post-MBA Salary']));
+      const expectedValue = (probability * (avgSalary || 0)) / 100;
       // Avg similarity score
       const avgSim = mean(neighbors.map(n => n.sim));
 
@@ -117,6 +123,7 @@
         probability,
         matchCount: neighbors.length,
         avgSalary: avgSalary || 0,
+        expectedValue,
         avgSimilarity: Math.round((avgSim || 0) * 100),
         schoolOfferRate,
         totalGrads: schoolRows.length,

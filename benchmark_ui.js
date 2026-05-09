@@ -139,6 +139,7 @@
         <div class="sc-prob">${data.probability}%</div>
         <div class="sc-prob-label">probability of ${result.targetIndustry} offer</div>
         <div class="sc-details">
+          <div class="sc-detail"><span class="sc-dl">Expected Value</span><span class="sc-dv" style="color:var(--green)">${BE.fmtMoney(data.expectedValue)}</span></div>
           <div class="sc-detail"><span class="sc-dl">Avg Salary</span><span class="sc-dv">${BE.fmtMoney(data.avgSalary)}</span></div>
           <div class="sc-detail"><span class="sc-dl">School Offer Rate</span><span class="sc-dv">${data.schoolOfferRate}%</span></div>
           <div class="sc-detail"><span class="sc-dl">Profile Match</span><span class="sc-dv">${data.avgSimilarity}%</span></div>
@@ -162,9 +163,41 @@
 
     container.innerHTML = html;
 
+    // What-If Sliders
+    let whatIfHtml = `
+      <div class="whatif-section" style="margin-top:14px;padding:14px;background:#fff;border:1px solid var(--line-2);border-radius:var(--ion-radius);">
+        <div class="panel-title">What-If Scenarios</div>
+        <div class="panel-sub">Adjust your metrics to see how your probabilities change</div>
+        <div style="display:flex;gap:20px;margin-top:14px;">
+          <div style="flex:1;">
+            <label style="font-size:11px;color:var(--muted);text-transform:uppercase;">GMAT Score: <span id="wi-gmat-val">${profile.GMAT || 400}</span></label>
+            <input type="range" id="wi-gmat" min="400" max="800" step="10" value="${profile.GMAT || 400}" style="width:100%;">
+          </div>
+          <div style="flex:1;">
+            <label style="font-size:11px;color:var(--muted);text-transform:uppercase;">GPA: <span id="wi-gpa-val">${profile.GPA || 2.0}</span></label>
+            <input type="range" id="wi-gpa" min="2.0" max="4.0" step="0.05" value="${profile.GPA || 2.0}" style="width:100%;">
+          </div>
+        </div>
+      </div>
+    `;
+    container.innerHTML += whatIfHtml;
+
     // Render probability chart
     renderProbabilityChart(result);
     renderRadarChart(result);
+
+    // Bind What-If events
+    document.getElementById('wi-gmat').addEventListener('input', (e) => {
+      document.getElementById('wi-gmat-val').textContent = e.target.value;
+      setProfileField('GMAT', e.target.value);
+      // Trigger a re-run
+      document.getElementById('btn-run-benchmark').click();
+    });
+    document.getElementById('wi-gpa').addEventListener('input', (e) => {
+      document.getElementById('wi-gpa-val').textContent = e.target.value;
+      setProfileField('GPA', e.target.value);
+      document.getElementById('btn-run-benchmark').click();
+    });
   }
 
   // --- Charts ---
@@ -246,47 +279,8 @@
   }
 
   // --- Resume Upload ---
-  async function handleResumeUpload() {
-    const fileInput = document.getElementById('resume-file');
-    const apiKeyInput = document.getElementById('gemini-key');
-    const statusEl = document.getElementById('resume-status');
-
-    if (!fileInput.files.length) { statusEl.textContent = 'Please select a file.'; return; }
-    const apiKey = apiKeyInput ? apiKeyInput.value.trim() : '';
-    if (!apiKey) { statusEl.textContent = 'Please enter your Gemini API key.'; return; }
-
-    statusEl.innerHTML = '<span class="scanning">⏳ Scanning resume with Gemini AI...</span>';
-    const file = fileInput.files[0];
-
-    try {
-      let text = '';
-      if (file.name.endsWith('.pdf') && window.pdfjsLib) {
-        const arrayBuf = await file.arrayBuffer();
-        const pdf = await pdfjsLib.getDocument({ data: arrayBuf }).promise;
-        for (let i = 1; i <= pdf.numPages; i++) {
-          const page = await pdf.getPage(i);
-          const tc = await page.getTextContent();
-          text += tc.items.map(item => item.str).join(' ') + '\n';
-        }
-      } else {
-        text = await file.text();
-      }
-
-      if (!text.trim()) { statusEl.textContent = 'Could not extract text from file.'; return; }
-
-      const extracted = await BE.extractResumeWithGemini(text, apiKey);
-      statusEl.innerHTML = '✅ Resume scanned — fields pre-filled below. Review and correct any values.';
-
-      // Pre-fill form
-      for (const [field, value] of Object.entries(extracted)) {
-        if (value != null) setProfileField(field, value);
-      }
-      // Update quality check
-      renderDataQuality(collectProfile());
-    } catch (err) {
-      statusEl.innerHTML = `<span style="color:var(--red)">❌ Error: ${err.message}</span>`;
-    }
-  }
+  // Note: Resume uploading is now handled by the Python backend in app.py
+  // which will inject window.__PREFILLED_PROFILE into the HTML.
 
   // --- Event Binding ---
   function init() {
@@ -316,15 +310,18 @@
       });
     }
 
-    const btnResume = document.getElementById('btn-scan-resume');
-    if (btnResume) {
-      btnResume.addEventListener('click', handleResumeUpload);
-    }
-
     // Auto-run quality check on input change
     document.querySelectorAll('.field-input, .field-select').forEach(el => {
       el.addEventListener('change', () => renderDataQuality(collectProfile()));
     });
+
+    // Check for pre-filled profile from Python backend
+    if (window.__PREFILLED_PROFILE) {
+      for (const [field, value] of Object.entries(window.__PREFILLED_PROFILE)) {
+        if (value != null) setProfileField(field, value);
+      }
+      renderDataQuality(collectProfile());
+    }
   }
 
   // Wait for DOM
