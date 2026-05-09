@@ -127,6 +127,8 @@
       container.innerHTML = '<p style="color:var(--muted)">Fill in your profile and click "Run Benchmark".</p>';
       return;
     }
+    
+    const profile = collectProfile();
 
     // School recommendation banner
     let html = `<div class="rec-banner">
