@@ -2329,7 +2329,7 @@ if app_mode == "Candidate Profiler":
         if not gemini_key:
             st.error("Please provide a Gemini API Key in the sidebar.")
         else:
-            with st.spinner("Extracting candidate data with Gemini..."):
+            with st.spinner("Extracting candidate data and analyzing with AI..."):
                 try:
                     text = ""
                     if resume_file.name.endswith('.pdf'):
@@ -2346,7 +2346,9 @@ if app_mode == "Candidate Profiler":
                     else:
                         text = resume_file.read().decode('utf-8', errors='ignore')
                         
-                    prompt = f"""You are an expert resume parser and admissions consultant. Extract data from the resume and also provide a brief critique for business school admissions. Return ONLY valid JSON with exactly two top-level keys: "profile" and "critique".
+                    prompt = f"""You are an expert resume parser and admissions consultant. 
+Extract data from the resume and also provide a brief critique for business school admissions. 
+Return ONLY valid JSON with exactly two top-level keys: "profile" and "critique".
 
 The "profile" object must have these exact keys (use null if not found):
 {{
@@ -2391,14 +2393,14 @@ RESUME TEXT:
                 except Exception as e:
                     st.error(f"Error parsing resume: {str(e)}")
 
-        if "resume_critique" in st.session_state and st.session_state.resume_critique:
-            critique = st.session_state.resume_critique
-            with st.expander("🤖 AI Resume Critique", expanded=True):
-                st.write(f"**Impact Score:** {critique.get('score', '?')}/10")
-                st.write("**Strengths:**")
-                for s in critique.get('strengths', []): st.write(f"- {s}")
-                st.write("**Areas for Improvement:**")
-                for w in critique.get('weaknesses', []): st.write(f"- {w}")
+    if "resume_critique" in st.session_state and st.session_state.resume_critique:
+        critique = st.session_state.resume_critique
+        with st.expander("🤖 AI Resume Critique", expanded=True):
+            st.write(f"**Impact Score:** {critique.get('score', '?')}/10")
+            st.write("**Strengths:**")
+            for s in critique.get('strengths', []): st.write(f"- {s}")
+            st.write("**Areas for Improvement:**")
+            for w in critique.get('weaknesses', []): st.write(f"- {w}")
 
     profiler_path = os.path.join(os.path.dirname(__file__), "Candidate_Dashboard_Enhanced.html")
     if os.path.exists(profiler_path):
@@ -2438,7 +2440,7 @@ RESUME TEXT:
                     try:
                         import google.generativeai as genai
                         genai.configure(api_key=gemini_key)
-                        model = genai.GenerativeModel('gemini-2.5-flash')
+                        model = genai.GenerativeModel('gemini-2.0-flash') # Using flash for speed
                         
                         context = "You are an expert MBA Admissions Consultant. Be concise, direct, and encouraging."
                         if "candidate_profile" in st.session_state:
@@ -2446,7 +2448,7 @@ RESUME TEXT:
                             
                         # Build history
                         history = [{"role": "user", "parts": [context]}, {"role": "model", "parts": ["Understood. I am ready to advise."]}]
-                        for m in st.session_state.consultant_messages[:-1]: # exclude latest
+                        for m in st.session_state.consultant_messages[:-1]:
                             role = "user" if m["role"] == "user" else "model"
                             history.append({"role": role, "parts": [m["content"]]})
                             
@@ -2456,9 +2458,7 @@ RESUME TEXT:
                         st.session_state.consultant_messages.append({"role": "assistant", "content": response.text})
                     except Exception as e:
                         st.error(f"Error: {str(e)}")
-
     st.stop()
-
 
 # --- Hero Header ---
 st.markdown("""
@@ -2496,53 +2496,7 @@ if not uploaded_files:
             "Supported formats: CSV, XLSX/XLS, PDF, DOCX, PNG/JPG. "
             "The app extracts tabular/text data, auto-detects schema and datetimes, and can combine multiple files."
         )
-
-    # --- AI Chat Assistant ---
-    st.markdown("---")
-    st.markdown("### 💬 Ask the AI Admissions Consultant")
-    st.caption("Ask questions about your profile, strategies to improve your chances, or details about the MBA landscape.")
-    
-    if "consultant_messages" not in st.session_state:
-        st.session_state.consultant_messages = []
-        
-    for msg in st.session_state.consultant_messages:
-        with st.chat_message(msg["role"]):
-            st.markdown(msg["content"])
-            
-    if user_query := st.chat_input("E.g., How can I compensate for a low GPA?"):
-        st.session_state.consultant_messages.append({"role": "user", "content": user_query})
-        with st.chat_message("user"):
-            st.markdown(user_query)
-            
-        with st.chat_message("assistant"):
-            if not gemini_key:
-                st.error("Please provide a Gemini API Key in the sidebar.")
-            else:
-                with st.spinner("Thinking..."):
-                    try:
-                        import google.generativeai as genai
-                        genai.configure(api_key=gemini_key)
-                        model = genai.GenerativeModel('gemini-2.5-flash')
-                        
-                        context = "You are an expert MBA Admissions Consultant. Be concise, direct, and encouraging."
-                        if "candidate_profile" in st.session_state:
-                            context += f"\n\nThe user's current profile is: {json.dumps(st.session_state.candidate_profile)}"
-                            
-                        # Build history
-                        history = [{"role": "user", "parts": [context]}, {"role": "model", "parts": ["Understood. I am ready to advise."]}]
-                        for m in st.session_state.consultant_messages[:-1]: # exclude latest
-                            role = "user" if m["role"] == "user" else "model"
-                            history.append({"role": role, "parts": [m["content"]]})
-                            
-                        chat = model.start_chat(history=history)
-                        response = chat.send_message(user_query)
-                        st.markdown(response.text)
-                        st.session_state.consultant_messages.append({"role": "assistant", "content": response.text})
-                    except Exception as e:
-                        st.error(f"Error: {str(e)}")
-
     st.stop()
-
 
 # --- Parse each uploaded CSV ---
 parsed_frames: list[pd.DataFrame] = []
@@ -2551,253 +2505,23 @@ file_names: list[str] = []
 for uf in uploaded_files:
     if uf.size > MAX_UPLOAD_MB * 1024 * 1024:
         st.error(f"**{uf.name}** exceeds {MAX_UPLOAD_MB}MB limit. Please upload a smaller file.")
-    
-    # --- AI Chat Assistant ---
-    st.markdown("---")
-    st.markdown("### 💬 Ask the AI Admissions Consultant")
-    st.caption("Ask questions about your profile, strategies to improve your chances, or details about the MBA landscape.")
-    
-    if "consultant_messages" not in st.session_state:
-        st.session_state.consultant_messages = []
-        
-    for msg in st.session_state.consultant_messages:
-        with st.chat_message(msg["role"]):
-            st.markdown(msg["content"])
-            
-    if user_query := st.chat_input("E.g., How can I compensate for a low GPA?"):
-        st.session_state.consultant_messages.append({"role": "user", "content": user_query})
-        with st.chat_message("user"):
-            st.markdown(user_query)
-            
-        with st.chat_message("assistant"):
-            if not gemini_key:
-                st.error("Please provide a Gemini API Key in the sidebar.")
-            else:
-                with st.spinner("Thinking..."):
-                    try:
-                        import google.generativeai as genai
-                        genai.configure(api_key=gemini_key)
-                        model = genai.GenerativeModel('gemini-2.5-flash')
-                        
-                        context = "You are an expert MBA Admissions Consultant. Be concise, direct, and encouraging."
-                        if "candidate_profile" in st.session_state:
-                            context += f"\n\nThe user's current profile is: {json.dumps(st.session_state.candidate_profile)}"
-                            
-                        # Build history
-                        history = [{"role": "user", "parts": [context]}, {"role": "model", "parts": ["Understood. I am ready to advise."]}]
-                        for m in st.session_state.consultant_messages[:-1]: # exclude latest
-                            role = "user" if m["role"] == "user" else "model"
-                            history.append({"role": role, "parts": [m["content"]]})
-                            
-                        chat = model.start_chat(history=history)
-                        response = chat.send_message(user_query)
-                        st.markdown(response.text)
-                        st.session_state.consultant_messages.append({"role": "assistant", "content": response.text})
-                    except Exception as e:
-                        st.error(f"Error: {str(e)}")
-
-    st.stop()
-
+        st.stop()
     try:
         df_i, meta_i = parse_uploaded_file(uf)
     except Exception as exc:
         st.error(f"Could not read **{uf.name}**. Check file format, structure, and parser requirements.")
         st.exception(exc)
-    
-    # --- AI Chat Assistant ---
-    st.markdown("---")
-    st.markdown("### 💬 Ask the AI Admissions Consultant")
-    st.caption("Ask questions about your profile, strategies to improve your chances, or details about the MBA landscape.")
-    
-    if "consultant_messages" not in st.session_state:
-        st.session_state.consultant_messages = []
-        
-    for msg in st.session_state.consultant_messages:
-        with st.chat_message(msg["role"]):
-            st.markdown(msg["content"])
-            
-    if user_query := st.chat_input("E.g., How can I compensate for a low GPA?"):
-        st.session_state.consultant_messages.append({"role": "user", "content": user_query})
-        with st.chat_message("user"):
-            st.markdown(user_query)
-            
-        with st.chat_message("assistant"):
-            if not gemini_key:
-                st.error("Please provide a Gemini API Key in the sidebar.")
-            else:
-                with st.spinner("Thinking..."):
-                    try:
-                        import google.generativeai as genai
-                        genai.configure(api_key=gemini_key)
-                        model = genai.GenerativeModel('gemini-2.5-flash')
-                        
-                        context = "You are an expert MBA Admissions Consultant. Be concise, direct, and encouraging."
-                        if "candidate_profile" in st.session_state:
-                            context += f"\n\nThe user's current profile is: {json.dumps(st.session_state.candidate_profile)}"
-                            
-                        # Build history
-                        history = [{"role": "user", "parts": [context]}, {"role": "model", "parts": ["Understood. I am ready to advise."]}]
-                        for m in st.session_state.consultant_messages[:-1]: # exclude latest
-                            role = "user" if m["role"] == "user" else "model"
-                            history.append({"role": role, "parts": [m["content"]]})
-                            
-                        chat = model.start_chat(history=history)
-                        response = chat.send_message(user_query)
-                        st.markdown(response.text)
-                        st.session_state.consultant_messages.append({"role": "assistant", "content": response.text})
-                    except Exception as e:
-                        st.error(f"Error: {str(e)}")
-
-    st.stop()
-
+        st.stop()
     if df_i is None or df_i.shape[1] == 0:
         st.error(f"**{uf.name}** has no columns.")
-    
-    # --- AI Chat Assistant ---
-    st.markdown("---")
-    st.markdown("### 💬 Ask the AI Admissions Consultant")
-    st.caption("Ask questions about your profile, strategies to improve your chances, or details about the MBA landscape.")
-    
-    if "consultant_messages" not in st.session_state:
-        st.session_state.consultant_messages = []
-        
-    for msg in st.session_state.consultant_messages:
-        with st.chat_message(msg["role"]):
-            st.markdown(msg["content"])
-            
-    if user_query := st.chat_input("E.g., How can I compensate for a low GPA?"):
-        st.session_state.consultant_messages.append({"role": "user", "content": user_query})
-        with st.chat_message("user"):
-            st.markdown(user_query)
-            
-        with st.chat_message("assistant"):
-            if not gemini_key:
-                st.error("Please provide a Gemini API Key in the sidebar.")
-            else:
-                with st.spinner("Thinking..."):
-                    try:
-                        import google.generativeai as genai
-                        genai.configure(api_key=gemini_key)
-                        model = genai.GenerativeModel('gemini-2.5-flash')
-                        
-                        context = "You are an expert MBA Admissions Consultant. Be concise, direct, and encouraging."
-                        if "candidate_profile" in st.session_state:
-                            context += f"\n\nThe user's current profile is: {json.dumps(st.session_state.candidate_profile)}"
-                            
-                        # Build history
-                        history = [{"role": "user", "parts": [context]}, {"role": "model", "parts": ["Understood. I am ready to advise."]}]
-                        for m in st.session_state.consultant_messages[:-1]: # exclude latest
-                            role = "user" if m["role"] == "user" else "model"
-                            history.append({"role": role, "parts": [m["content"]]})
-                            
-                        chat = model.start_chat(history=history)
-                        response = chat.send_message(user_query)
-                        st.markdown(response.text)
-                        st.session_state.consultant_messages.append({"role": "assistant", "content": response.text})
-                    except Exception as e:
-                        st.error(f"Error: {str(e)}")
-
-    st.stop()
-
+        st.stop()
     if df_i.empty:
         st.error(f"**{uf.name}** has no rows.")
-    
-    # --- AI Chat Assistant ---
-    st.markdown("---")
-    st.markdown("### 💬 Ask the AI Admissions Consultant")
-    st.caption("Ask questions about your profile, strategies to improve your chances, or details about the MBA landscape.")
-    
-    if "consultant_messages" not in st.session_state:
-        st.session_state.consultant_messages = []
-        
-    for msg in st.session_state.consultant_messages:
-        with st.chat_message(msg["role"]):
-            st.markdown(msg["content"])
-            
-    if user_query := st.chat_input("E.g., How can I compensate for a low GPA?"):
-        st.session_state.consultant_messages.append({"role": "user", "content": user_query})
-        with st.chat_message("user"):
-            st.markdown(user_query)
-            
-        with st.chat_message("assistant"):
-            if not gemini_key:
-                st.error("Please provide a Gemini API Key in the sidebar.")
-            else:
-                with st.spinner("Thinking..."):
-                    try:
-                        import google.generativeai as genai
-                        genai.configure(api_key=gemini_key)
-                        model = genai.GenerativeModel('gemini-2.5-flash')
-                        
-                        context = "You are an expert MBA Admissions Consultant. Be concise, direct, and encouraging."
-                        if "candidate_profile" in st.session_state:
-                            context += f"\n\nThe user's current profile is: {json.dumps(st.session_state.candidate_profile)}"
-                            
-                        # Build history
-                        history = [{"role": "user", "parts": [context]}, {"role": "model", "parts": ["Understood. I am ready to advise."]}]
-                        for m in st.session_state.consultant_messages[:-1]: # exclude latest
-                            role = "user" if m["role"] == "user" else "model"
-                            history.append({"role": role, "parts": [m["content"]]})
-                            
-                        chat = model.start_chat(history=history)
-                        response = chat.send_message(user_query)
-                        st.markdown(response.text)
-                        st.session_state.consultant_messages.append({"role": "assistant", "content": response.text})
-                    except Exception as e:
-                        st.error(f"Error: {str(e)}")
-
-    st.stop()
-
+        st.stop()
     df_i = df_i.dropna(how="all").copy()
     if df_i.empty:
         st.error(f"**{uf.name}** has no usable rows after removing empty rows.")
-    
-    # --- AI Chat Assistant ---
-    st.markdown("---")
-    st.markdown("### 💬 Ask the AI Admissions Consultant")
-    st.caption("Ask questions about your profile, strategies to improve your chances, or details about the MBA landscape.")
-    
-    if "consultant_messages" not in st.session_state:
-        st.session_state.consultant_messages = []
-        
-    for msg in st.session_state.consultant_messages:
-        with st.chat_message(msg["role"]):
-            st.markdown(msg["content"])
-            
-    if user_query := st.chat_input("E.g., How can I compensate for a low GPA?"):
-        st.session_state.consultant_messages.append({"role": "user", "content": user_query})
-        with st.chat_message("user"):
-            st.markdown(user_query)
-            
-        with st.chat_message("assistant"):
-            if not gemini_key:
-                st.error("Please provide a Gemini API Key in the sidebar.")
-            else:
-                with st.spinner("Thinking..."):
-                    try:
-                        import google.generativeai as genai
-                        genai.configure(api_key=gemini_key)
-                        model = genai.GenerativeModel('gemini-2.5-flash')
-                        
-                        context = "You are an expert MBA Admissions Consultant. Be concise, direct, and encouraging."
-                        if "candidate_profile" in st.session_state:
-                            context += f"\n\nThe user's current profile is: {json.dumps(st.session_state.candidate_profile)}"
-                            
-                        # Build history
-                        history = [{"role": "user", "parts": [context]}, {"role": "model", "parts": ["Understood. I am ready to advise."]}]
-                        for m in st.session_state.consultant_messages[:-1]: # exclude latest
-                            role = "user" if m["role"] == "user" else "model"
-                            history.append({"role": role, "parts": [m["content"]]})
-                            
-                        chat = model.start_chat(history=history)
-                        response = chat.send_message(user_query)
-                        st.markdown(response.text)
-                        st.session_state.consultant_messages.append({"role": "assistant", "content": response.text})
-                    except Exception as e:
-                        st.error(f"Error: {str(e)}")
-
-    st.stop()
-
+        st.stop()
     parsed_frames.append(df_i)
     parsed_metas.append(meta_i)
     file_names.append(uf.name)
@@ -2846,53 +2570,7 @@ else:
             shared_cols = sorted(shared_cols_set)
             if not shared_cols:
                 st.error("No columns in common across all files. Use 'Stack rows' instead.")
-            
-    # --- AI Chat Assistant ---
-    st.markdown("---")
-    st.markdown("### 💬 Ask the AI Admissions Consultant")
-    st.caption("Ask questions about your profile, strategies to improve your chances, or details about the MBA landscape.")
-    
-    if "consultant_messages" not in st.session_state:
-        st.session_state.consultant_messages = []
-        
-    for msg in st.session_state.consultant_messages:
-        with st.chat_message(msg["role"]):
-            st.markdown(msg["content"])
-            
-    if user_query := st.chat_input("E.g., How can I compensate for a low GPA?"):
-        st.session_state.consultant_messages.append({"role": "user", "content": user_query})
-        with st.chat_message("user"):
-            st.markdown(user_query)
-            
-        with st.chat_message("assistant"):
-            if not gemini_key:
-                st.error("Please provide a Gemini API Key in the sidebar.")
-            else:
-                with st.spinner("Thinking..."):
-                    try:
-                        import google.generativeai as genai
-                        genai.configure(api_key=gemini_key)
-                        model = genai.GenerativeModel('gemini-2.5-flash')
-                        
-                        context = "You are an expert MBA Admissions Consultant. Be concise, direct, and encouraging."
-                        if "candidate_profile" in st.session_state:
-                            context += f"\n\nThe user's current profile is: {json.dumps(st.session_state.candidate_profile)}"
-                            
-                        # Build history
-                        history = [{"role": "user", "parts": [context]}, {"role": "model", "parts": ["Understood. I am ready to advise."]}]
-                        for m in st.session_state.consultant_messages[:-1]: # exclude latest
-                            role = "user" if m["role"] == "user" else "model"
-                            history.append({"role": role, "parts": [m["content"]]})
-                            
-                        chat = model.start_chat(history=history)
-                        response = chat.send_message(user_query)
-                        st.markdown(response.text)
-                        st.session_state.consultant_messages.append({"role": "assistant", "content": response.text})
-                    except Exception as e:
-                        st.error(f"Error: {str(e)}")
-
-    st.stop()
-
+                st.stop()
 
             # Rank merge key candidates: prefer datetime > high-uniqueness > others
             # This prevents users from merging on low-cardinality columns like Duration
@@ -3206,53 +2884,7 @@ st.session_state["working_data"] = working_data
 data = st.session_state["working_data"]
 if data.empty:
     st.error("No rows remain after cleaning. Re-upload or adjust cleaning options.")
-
-    # --- AI Chat Assistant ---
-    st.markdown("---")
-    st.markdown("### 💬 Ask the AI Admissions Consultant")
-    st.caption("Ask questions about your profile, strategies to improve your chances, or details about the MBA landscape.")
-    
-    if "consultant_messages" not in st.session_state:
-        st.session_state.consultant_messages = []
-        
-    for msg in st.session_state.consultant_messages:
-        with st.chat_message(msg["role"]):
-            st.markdown(msg["content"])
-            
-    if user_query := st.chat_input("E.g., How can I compensate for a low GPA?"):
-        st.session_state.consultant_messages.append({"role": "user", "content": user_query})
-        with st.chat_message("user"):
-            st.markdown(user_query)
-            
-        with st.chat_message("assistant"):
-            if not gemini_key:
-                st.error("Please provide a Gemini API Key in the sidebar.")
-            else:
-                with st.spinner("Thinking..."):
-                    try:
-                        import google.generativeai as genai
-                        genai.configure(api_key=gemini_key)
-                        model = genai.GenerativeModel('gemini-2.5-flash')
-                        
-                        context = "You are an expert MBA Admissions Consultant. Be concise, direct, and encouraging."
-                        if "candidate_profile" in st.session_state:
-                            context += f"\n\nThe user's current profile is: {json.dumps(st.session_state.candidate_profile)}"
-                            
-                        # Build history
-                        history = [{"role": "user", "parts": [context]}, {"role": "model", "parts": ["Understood. I am ready to advise."]}]
-                        for m in st.session_state.consultant_messages[:-1]: # exclude latest
-                            role = "user" if m["role"] == "user" else "model"
-                            history.append({"role": role, "parts": [m["content"]]})
-                            
-                        chat = model.start_chat(history=history)
-                        response = chat.send_message(user_query)
-                        st.markdown(response.text)
-                        st.session_state.consultant_messages.append({"role": "assistant", "content": response.text})
-                    except Exception as e:
-                        st.error(f"Error: {str(e)}")
-
     st.stop()
-
 
 numeric_cols, categorical_cols, datetime_cols, other_cols = column_types(data)
 filtered_data, filter_summaries = apply_filters_sidebar(data, numeric_cols, categorical_cols, datetime_cols)
