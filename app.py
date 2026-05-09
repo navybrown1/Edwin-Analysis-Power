@@ -2440,7 +2440,7 @@ RESUME TEXT:
                     try:
                         import google.generativeai as genai
                         genai.configure(api_key=gemini_key)
-                        model = genai.GenerativeModel('gemini-2.0-flash') # Using flash for speed
+                        model = genai.GenerativeModel('gemini-1.5-flash') # Using flash for speed
                         
                         context = "You are an expert MBA Admissions Consultant. Be concise, direct, and encouraging."
                         if "candidate_profile" in st.session_state:
