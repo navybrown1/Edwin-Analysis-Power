@@ -34,7 +34,10 @@
     for (const [field, range] of Object.entries(numericRanges)) {
       html += `
         <div class="profile-field">
-          <label class="field-label">${field}</label>
+          <label class="field-label" style="display:flex; justify-content:space-between; align-items:center;">
+            <span>${field}</span>
+            ${field === 'GMAT' ? '<label style="text-transform:none;font-weight:normal;font-size:9px;cursor:pointer;color:var(--muted);"><input type="checkbox" id="pf-gmat-na" style="margin-right:4px;">N/A</label>' : ''}
+          </label>
           <input type="number" class="field-input" id="pf-${slugify(field)}"
             min="${range.min}" max="${range.max}" step="${range.step}"
             placeholder="${range.placeholder}" />
@@ -72,8 +75,15 @@
 
   function setProfileField(field, value) {
     const el = document.getElementById('pf-' + slugify(field));
-    if (el && value != null && value !== '') {
-      el.value = value;
+    if (el) {
+      el.value = value != null ? value : '';
+      if (field === 'GMAT') {
+        const na = document.getElementById('pf-gmat-na');
+        if (na) {
+          na.checked = (value == null || value === '');
+          el.disabled = na.checked;
+        }
+      }
     }
   }
 
@@ -170,8 +180,11 @@
         <div class="panel-sub">Adjust your metrics to see how your probabilities change</div>
         <div style="display:flex;gap:20px;margin-top:14px;">
           <div style="flex:1;">
-            <label style="font-size:11px;color:var(--muted);text-transform:uppercase;">GMAT Score: <span id="wi-gmat-val">${profile.GMAT || 400}</span></label>
-            <input type="range" id="wi-gmat" min="400" max="800" step="10" value="${profile.GMAT || 400}" style="width:100%;">
+            <label style="font-size:11px;color:var(--muted);text-transform:uppercase;display:flex;justify-content:space-between;align-items:center;">
+              <span>GMAT Score: <span id="wi-gmat-val">${profile.GMAT || 'N/A'}</span></span>
+              <label style="text-transform:none;font-weight:normal;font-size:9px;cursor:pointer;"><input type="checkbox" id="wi-gmat-na" ${!profile.GMAT ? 'checked' : ''} style="margin-right:3px;">N/A</label>
+            </label>
+            <input type="range" id="wi-gmat" min="400" max="800" step="10" value="${profile.GMAT || 400}" style="width:100%;" ${!profile.GMAT ? 'disabled' : ''}>
           </div>
           <div style="flex:1;">
             <label style="font-size:11px;color:var(--muted);text-transform:uppercase;">GPA: <span id="wi-gpa-val">${profile.GPA || 2.0}</span></label>
@@ -187,12 +200,27 @@
     renderRadarChart(result);
 
     // Bind What-If events
-    document.getElementById('wi-gmat').addEventListener('input', (e) => {
-      document.getElementById('wi-gmat-val').textContent = e.target.value;
-      setProfileField('GMAT', e.target.value);
-      // Trigger a re-run
-      document.getElementById('btn-run-benchmark').click();
-    });
+    const wiGmatNa = document.getElementById('wi-gmat-na');
+    const wiGmat = document.getElementById('wi-gmat');
+    if (wiGmatNa && wiGmat) {
+      wiGmatNa.addEventListener('change', (e) => {
+        wiGmat.disabled = e.target.checked;
+        if (e.target.checked) {
+          document.getElementById('wi-gmat-val').textContent = 'N/A';
+          setProfileField('GMAT', '');
+        } else {
+          document.getElementById('wi-gmat-val').textContent = wiGmat.value;
+          setProfileField('GMAT', wiGmat.value);
+        }
+        document.getElementById('btn-run-benchmark').click();
+      });
+      wiGmat.addEventListener('input', (e) => {
+        document.getElementById('wi-gmat-val').textContent = e.target.value;
+        setProfileField('GMAT', e.target.value);
+        // Trigger a re-run
+        document.getElementById('btn-run-benchmark').click();
+      });
+    }
     document.getElementById('wi-gpa').addEventListener('input', (e) => {
       document.getElementById('wi-gpa-val').textContent = e.target.value;
       setProfileField('GPA', e.target.value);
@@ -314,6 +342,20 @@
     document.querySelectorAll('.field-input, .field-select').forEach(el => {
       el.addEventListener('change', () => renderDataQuality(collectProfile()));
     });
+    
+    // Bind Profile GMAT N/A Checkbox
+    const gmatNA = document.getElementById('pf-gmat-na');
+    const gmatInput = document.getElementById('pf-gmat');
+    if (gmatNA && gmatInput) {
+      gmatNA.addEventListener('change', (e) => {
+        gmatInput.disabled = e.target.checked;
+        if (e.target.checked) gmatInput.value = '';
+        renderDataQuality(collectProfile());
+      });
+      gmatInput.addEventListener('input', () => {
+         if (gmatInput.value !== '') gmatNA.checked = false;
+      });
+    }
 
     // Check for pre-filled profile from Python backend
     if (window.__PREFILLED_PROFILE) {
